@@ -241,35 +241,23 @@ cylinder(
 
 **Parameters**
 
-**h**: height of the cylinder or cone
+`h`: height of the cylinder or cone
+`r`: radius of cylinder. `r1 = r2 = r`.
+`r1`: radius, bottom of cone.
+`r2`: radius, top of cone.
+`d`: diameter of cylinder. `r1 = r2 = d / 2`. [*Note:* Requires version 2014.03]
+`d1`: diameter, bottom of cone. `r1 = d1 / 2`. [*Note:* Requires version 2014.03]
+`d2`: diameter, top of cone. `r2 = d2 / 2`. [*Note:* Requires version 2014.03]
+`center`:
+- `false` (default), z ranges from 0 to h
+- `true` - z ranges from `-h/2` to `+h/2`.
 
-**r** : radius of cylinder. r1 = r2 = r.
+`$fa`: minimum angle (in degrees) of each fragment.
+`$fs`: minimum circumferential length of each fragment.
+`$fn`: **fixed** number of fragments in 360 degrees. Values of 3 or more override `$fa` and `$fs`
 
-**r1**: radius, bottom of cone.
-
-**r2**: radius, top of cone.
-
-**d** : diameter of cylinder. r1 = r2 = d / 2. [Note: Requires version 2014.03]
-
-**d1**: diameter, bottom of cone. r1 = d1 / 2. [Note: Requires version 2014.03]
-
-**d2**: diameter, top of cone. r2 = d2 / 2. [Note: Requires version 2014.03]
-
-**center**
-
-**false** (default), z ranges from 0 to h
-
-**true**, z ranges from -h/2 to +h/2
-
-**$fa**: minimum angle (in degrees) of each fragment.
-
-**$fs**: minimum circumferential length of each fragment.
-
-**$fn**: **fixed** number of fragments in 360 degrees. Values of 3 or
-more override $fa and $fs
-
-$fa, $fs and $fn must be named parameters. [click here for more
-details,](https://en.wikibooks.org/wiki/OpenSCAD_User_Manual/Other_Language_Features "OpenSCAD User Manual/Other Language Features").
+`$fa`, `$fs` and `$fn` must be named parameters. [click here for more
+details](https://en.wikibooks.org/wiki/OpenSCAD_User_Manual/Other_Language_Features).
 
 ```scad
 defaults : cylinder();
@@ -369,13 +357,13 @@ cylinder(20, 20, 10, $fn = 4);
 
 **undersized holes**
 
-Using cylinder() with difference() to place holes in objects creates
+Using `cylinder()` with `difference()` to place holes in objects creates
 undersized holes. This is because circular paths are approximated with
 polygons inscribed within in a circle. The points of the polygon are on
 the circle, but straight lines between are inside. To have all of the
 hole larger than the true circle, the polygon must lie wholly outside of
 the circle (circumscribed). [Modules for circumscribed
-holes](https://en.wikibooks.org/wiki/OpenSCAD_User_Manual/undersized_circular_objects "OpenSCAD User Manual/undersized circular objects")
+holes](https://en.wikibooks.org/wiki/OpenSCAD_User_Manual/undersized_circular_objects)
 
 - <https://en.wikibooks.org/wiki/File:OpenSCAD_Under_size_hole.jpg>
 
@@ -419,41 +407,10 @@ polyhedron(
 
 **Parameters**
 
-**points**
-
-Vector of 3d points or vertices. Each point is in turn a vector,
-[x,y,z], of its coordinates.
-
-Points may be defined in any order. N points are referenced, in the
-order defined, as 0 to N-1.
-
-**triangles** [*Deprecated:
-**triangles** will be removed in future releases.Use **faces**
-parameter instead*]
-
-Vector of faces that collectively enclose the solid. Each face is a
-vector containing the indices (0 based) of 3 points from the points
-vector.
-
-**faces** [Note: Requires version 2014.03]
-
-Vector of faces that collectively enclose the solid. Each face is a
-vector containing the indices (0 based) of 3 or more points from the
-points vector.
-
-Faces may be defined in any order. Define enough faces to fully enclose
-the solid, with no overlap.
-
-If points that describe a single face are not on the same plane, the
-face is automatically split into triangles as needed.
-
-**convexity**
-
-Integer. The convexity parameter specifies the maximum number of faces a
-ray intersecting the object might penetrate. This parameter is needed
-only for correct display of the object in OpenCSG preview mode. It has
-no effect on the polyhedron rendering. For display problems, setting it
-to 10 should work fine for most cases.
+`points`: Vector of 3d points or vertices. Each point is in turn a vector, `[x,y,z]`, of its coordinates. Points may be defined in any order. N points are referenced, in the order defined, as `0` to `N-1`.
+`triangles` [*Deprecated: `triangles` will be removed in future releases. Use `faces` parameter instead*]: Vector of faces that collectively enclose the solid. Each face is a vector containing the indices (0 based) of 3 points from the points vector.
+`faces` [Note: Requires version 2014.03]: Vector of faces that collectively enclose the solid. Each face is a vector containing the indices (0 based) of 3 or more points from the points vector. Faces may be defined in any order. Define enough faces to fully enclose the solid, with no overlap. If points that describe a single face are not on the same plane, the face is automatically split into triangles as needed.
+`convexity`: Integer. The convexity parameter specifies the maximum number of faces a ray intersecting the object might penetrate. This parameter is needed only for correct display of the object in OpenCSG preview mode. It has no effect on the polyhedron rendering. For display problems, setting it to 10 should work fine for most cases.
 
 ```scad
 default values: polyhedron();
@@ -736,7 +693,7 @@ polyhedron(
 
 ```
 
-Beginner's tip
+**Beginner's tip**
 
 If you don't really understand "orientation", try to identify the
 mis-oriented pink faces and then invert the sequence of the references
@@ -748,7 +705,7 @@ and number both the points and the faces. In our example, the points are
 annotated in black and the faces in blue. Turn the object around and
 make a second copy from the back if needed. This way you can keep track.
 
-Clockwise Technique
+**Clockwise Technique**
 
 Orientation is determined by clockwise circular indexing. This means
 that if you're looking at the triangle (in this case [4,0,5]) from the
@@ -772,7 +729,7 @@ If your thumb points inward, you need to reverse the winding order.
 
 Polyhedron with badly oriented polygons
 
-Succinct description of a 'Polyhedron'
+**Succinct description of a 'Polyhedron'**
 
 ```scad
 *Points define all of the points /
@@ -829,10 +786,10 @@ polyhedron(points, [
 
 Retrieved from "[https://en.wikibooks.org/w/index.php?title=OpenSCAD_User_Manual/Primitive_Solids&oldid=4040599](https://en.wikibooks.org/w/index.php?title=OpenSCAD_User_Manual/Primitive_Solids&oldid=4040599)"
 
-[Category](https://en.wikibooks.org/wiki/Special:Categories "Special:Categories"):
+[Category](https://en.wikibooks.org/wiki/Special:Categories):
 
 - [Book:OpenSCAD User
-  Manual](https://en.wikibooks.org/wiki/Category:Book:OpenSCAD_User_Manual "Category:Book:OpenSCAD User Manual")
+  Manual](https://en.wikibooks.org/wiki/Category:Book:OpenSCAD_User_Manual)
   */
   module polyhedron(points, faces, convexity=1) {}
 
@@ -843,23 +800,11 @@ name is optional. To use d instead of r, d must be named.
 
 **Parameters**
 
-r
-Radius. This is the radius of the sphere. The resolution of the sphere
-is based on the size of the sphere and the $fa, $fs and $fn variables.
-For more information on these special variables look at:
-[OpenSCAD_User_Manual/Other_Language_Features](https://en.wikibooks.org/wiki/OpenSCAD_User_Manual/Other_Language_Features "OpenSCAD User Manual/Other Language Features")
-
-d
-Diameter. This is the diameter of the sphere.
-
-$fa
-Fragment angle in degrees
-
-$fs
-Fragment size in mm
-
-$fn
-Resolution
+`r`: Radius. This is the radius of the sphere. The resolution of the sphere is based on the size of the sphere and the `$fa`, `$fs` and `$fn` variables. For more information on these special variables look at: [OpenSCAD_User_Manual/Other_Language_Features](https://en.wikibooks.org/wiki/OpenSCAD_User_Manual/Other_Language_Features).
+`d`: Diameter. This is the diameter of the sphere.
+`$fa`: Fragment angle in degrees.
+`$fs`: Fragment size in mm.
+`$fn`: Resolution.
 
 <!-- -->
 
@@ -912,14 +857,11 @@ circle(r = radius | d = diameter);
 
 **Parameters**
 
-**r**: circle radius. r name is the only one optional with circle.
-
-circle resolution is based on size, using $fa or $fs.
-
-For a small, high resolution circle you can make a large circle, then
-scale it down, or you could set $fn or other special variables. Note:
-These examples exceed the resolution of a 3d printer as well as of the
-display screen.
+`r`: Circle radius. `r` is the only optional parameter name for `circle()`. Circle resolution is based on size, using `$fa` or `$fs`. For a small, high resolution circle you can make a large circle, then scale it down, or you could set `$fn` or other special variables. Note: These examples exceed the resolution of a 3d printer as well as of the display screen.
+`d`: Circle diameter (only available in versions later than 2014.03).
+`$fa`: Minimum angle (in degrees) of each fragment.
+`$fs`: Minimum circumferential length of each fragment.
+`$fn`: **fixed** number of fragments in 360 degrees. Values of 3 or more override `$fa` and `$fs`.
 
 ```scad
 scale([ 1 / 100, 1 / 100, 1 / 100 ]) circle(
@@ -928,19 +870,9 @@ circle(2, $fn = 50); // Another way.
 
 ```
 
-**d** : circle diameter (only available in versions later than
-2014.03).
-
-**$fa**: minimum angle (in degrees) of each fragment.
-
-**$fs**: minimum circumferential length of each fragment.
-
-**$fn**: **fixed** number of fragments in 360 degrees. Values of 3 or
-more override $fa and $fs.
-
-If they are used, $fa, $fs and $fn must be named parameters. [click here
+If they are used, `$fa`, `$fs` and `$fn` must be named parameters. [click here
 for more
-details,](https://en.wikibooks.org/wiki/OpenSCAD_User_Manual/Other_Language_Features "OpenSCAD User Manual/Other Language Features").
+details,](https://en.wikibooks.org/wiki/OpenSCAD_User_Manual/Other_Language_Features).
 
 ```scad
 defaults : circle();
@@ -968,7 +900,7 @@ circle(d = 2 + 9 * 2);
 
 An ellipse can be created from a circle by using either `scale()` or
 `resize()` to make the x and y dimensions unequal. See [OpenSCAD User
-Manual/Transformations](https://en.wikibooks.org/wiki/OpenSCAD_User_Manual/Transformations "OpenSCAD User Manual/Transformations")
+Manual/Transformations](https://en.wikibooks.org/wiki/OpenSCAD_User_Manual/Transformations)
 
 <https://en.wikibooks.org/wiki/File:OpenScad_Ellipse_from_circle.jpg>
 
@@ -1361,68 +1293,16 @@ installed on the local system or provided as separate font file.
 
 **Parameters**
 
-text
-String. The text to generate.
-
-<!-- -->
-
-size
-Decimal. The generated text has an ascent (height above the baseline) of
-approximately the given value. Default is 10. Different fonts can vary
-somewhat and may not fill the size specified exactly, typically they
-render slightly smaller. On a metric system a size of 25.4 (1" imperial)
-will correspond to 100pt ⇒ a 12pt font size would be 12×0.254 for metric
-conversion or 0.12 in imperial.
-
-<!-- -->
-
-font
-String. The name of the font that should be used. This is not the name
-of the font file, but the logical font name (internally handled by the
-fontconfig library). This can also include a style parameter, see below.
-A list of installed fonts & styles can be obtained using the font list
-dialog (Help -> Font List).
-
-<!-- -->
-
-halign
-String. The horizontal alignment for the text. Possible values are
-"left", "center" and "right". Default is "left".
-
-<!-- -->
-
-valign
-String. The vertical alignment for the text. Possible values are "top",
-"center", "baseline" and "bottom". Default is "baseline".
-
-<!-- -->
-
-spacing
-Decimal. Factor to increase/decrease the character spacing. The default
-value of 1 results in the normal spacing for the font, giving a value
-greater than 1 causes the letters to be spaced further apart.
-
-<!-- -->
-
-direction
-String. Direction of the text flow. Possible values are "ltr"
-(left-to-right), "rtl" (right-to-left), "ttb" (top-to-bottom) and "btt"
-(bottom-to-top). Default is "ltr".
-
-<!-- -->
-
-language
-String. The language of the text. Default is "en".
-
-<!-- -->
-
-script
-String. The script of the text. Default is "latin".
-
-<!-- -->
-
-$fn
-used for subdividing the curved path segments provided by freetype
+`text`: String. The text to generate.
+`size`: Decimal. The generated text has an ascent (height above the baseline) of approximately the given value. Default is `10`. Different fonts can vary somewhat and may not fill the size specified exactly; typically they render slightly smaller. On a metric system a size of `25.4` (1" imperial) corresponds to `100pt` ⇒ a `12pt` font size would be `12 × 0.254` for metric conversion or `0.12` in imperial.
+`font`: String. The name of the font that should be used. This is not the name of the font file, but the logical font name (internally handled by the fontconfig library). This can also include a style parameter, see below. A list of installed fonts & styles can be obtained using the font list dialog (`Help -> Font List`).
+`halign`: String. The horizontal alignment for the text. Possible values are `left`, `center` and `right`. Default is `left`.
+`valign`: String. The vertical alignment for the text. Possible values are `top`, `center`, `baseline` and `bottom`. Default is `baseline`.
+`spacing`: Decimal. Factor to increase or decrease the character spacing. The default value of `1` results in the normal spacing for the font; giving a value greater than `1` causes the letters to be spaced further apart.
+`direction`: String. Direction of the text flow. Possible values are `ltr` (left-to-right), `rtl` (right-to-left), `ttb` (top-to-bottom) and `btt` (bottom-to-top). Default is `ltr`.
+`language`: String. The language of the text. Default is `en`.
+`script`: String. The script of the text. Default is `latin`.
+`$fn`: Used for subdividing the curved path segments provided by freetype.
 
 **Example**
 
@@ -1685,7 +1565,7 @@ for (a = halign) {
 
 Text can be changed from a 2 dimensional object into a 3D object by
 using the
-[linear_extrude](https://en.wikibooks.org/wiki/OpenSCAD_User_Manual/2D_to_3D_Extrusion#Linear_Extrude "OpenSCAD User Manual/2D to 3D Extrusion")
+[linear_extrude](https://en.wikibooks.org/wiki/OpenSCAD_User_Manual/2D_to_3D_Extrusion#Linear_Extrude)
 function.
 
 ```scad
@@ -1702,10 +1582,10 @@ linear_extrude(4) text("Text");
 
 Retrieved from "[https://en.wikibooks.org/w/index.php?title=OpenSCAD_User_Manual/Text&oldid=4085975](https://en.wikibooks.org/w/index.php?title=OpenSCAD_User_Manual/Text&oldid=4085975)"
 
-[Category](https://en.wikibooks.org/wiki/Special:Categories "Special:Categories"):
+[Category](https://en.wikibooks.org/wiki/Special:Categories):
 
 - [Book:OpenSCAD User
-  Manual](https://en.wikibooks.org/wiki/Category:Book:OpenSCAD_User_Manual "Category:Book:OpenSCAD User Manual")
+  Manual](https://en.wikibooks.org/wiki/Category:Book:OpenSCAD_User_Manual)
 
 */
 module text(text) {}
@@ -1999,7 +1879,7 @@ difference() {
 difference operation have an overlap, and that the negative piece being
 removed extends fully outside of the volume it is removing that surface
 from. Failure to follow this rule can cause [preview
-artifacts](https://en.wikibooks.org/wiki/OpenSCAD_User_Manual/FAQ#What_are_those_strange_flickering_artifacts_in_the_preview? "OpenSCAD User Manual/FAQ")
+artifacts](https://en.wikibooks.org/wiki/OpenSCAD_User_Manual/FAQ#What_are_those_strange_flickering_artifacts_in_the_preview?)
 and can result in non-manifold render warnings or the removal of pieces
 from the render output. See the description above in union for why this
 is required and an example of how to do this by this using a small
@@ -2120,10 +2000,10 @@ color("green") rotate([ 45, 0, 0 ]) translate([ 0, 10, 0 ])
 
 Retrieved from "[https://en.wikibooks.org/w/index.php?title=OpenSCAD_User_Manual/Transformations&oldid=4082820](https://en.wikibooks.org/w/index.php?title=OpenSCAD_User_Manual/Transformations&oldid=4082820)"
 
-[Category](https://en.wikibooks.org/wiki/Special:Categories "Special:Categories"):
+[Category](https://en.wikibooks.org/wiki/Special:Categories):
 
 - [Book:OpenSCAD User
-  Manual](https://en.wikibooks.org/wiki/Category:Book:OpenSCAD_User_Manual "Category:Book:OpenSCAD User Manual")
+  Manual](https://en.wikibooks.org/wiki/Category:Book:OpenSCAD_User_Manual)
   */
   module hull() { builtin_flags(0000000000000001); }
 
@@ -2333,7 +2213,7 @@ linear_extrude(
 ```
 
 The [special
-variables](https://en.wikibooks.org/wiki/OpenSCAD_User_Manual/Other_Language_Features "OpenSCAD User Manual/Other Language Features")
+variables](https://en.wikibooks.org/wiki/OpenSCAD_User_Manual/Other_Language_Features)
 $fn, $fs and $fa can also be used to improve the output. If slices is
 not defined, its value is taken from the defined $fn value.
 
@@ -2833,10 +2713,10 @@ Links:
 
 Retrieved from "[https://en.wikibooks.org/w/index.php?title=OpenSCAD_User_Manual/3D_to_2D_Projection&oldid=3674389](https://en.wikibooks.org/w/index.php?title=OpenSCAD_User_Manual/3D_to_2D_Projection&oldid=3674389)"
 
-[Category](https://en.wikibooks.org/wiki/Special:Categories "Special:Categories"):
+[Category](https://en.wikibooks.org/wiki/Special:Categories):
 
 - [Book:OpenSCAD User
-  Manual](https://en.wikibooks.org/wiki/Category:Book:OpenSCAD_User_Manual "Category:Book:OpenSCAD User Manual")
+  Manual](https://en.wikibooks.org/wiki/Category:Book:OpenSCAD_User_Manual)
 
 */
 module projection(cut = false) { builtin_flags(0000000000000001); }
@@ -2870,10 +2750,10 @@ fine for most cases.
 
 Retrieved from "[https://en.wikibooks.org/w/index.php?title=OpenSCAD_User_Manual/CSG_Modelling&oldid=3830886](https://en.wikibooks.org/w/index.php?title=OpenSCAD_User_Manual/CSG_Modelling&oldid=3830886)"
 
-[Category](https://en.wikibooks.org/wiki/Special:Categories "Special:Categories"):
+[Category](https://en.wikibooks.org/wiki/Special:Categories):
 
 - [Book:OpenSCAD User
-  Manual](https://en.wikibooks.org/wiki/Category:Book:OpenSCAD_User_Manual "Category:Book:OpenSCAD User Manual")
+  Manual](https://en.wikibooks.org/wiki/Category:Book:OpenSCAD_User_Manual)
   */
   module render() { builtin_flags(0000000000000001); }
 
@@ -3122,7 +3002,7 @@ height is used.
 
 It can not be used to produce a helix or screw threads. (These things
 can be done with
-[linear_extrude()](https://en.wikibooks.org/wiki/OpenSCAD_User_Manual/The_OpenSCAD_Language#Linear_Extrude "OpenSCAD User Manual/The OpenSCAD Language")
+[linear_extrude()](https://en.wikibooks.org/wiki/OpenSCAD_User_Manual/The_OpenSCAD_Language#Linear_Extrude)
 using the twist parameter.)
 
 The 2D shape **must** lie completely on either the right (recommended)
@@ -3170,7 +3050,7 @@ angle sweeps clockwise.
 more override $fa and $fs
 
 $fa, $fs and $fn must be named parameters. [click here for more
-details,](https://en.wikibooks.org/wiki/OpenSCAD_User_Manual/Other_Language_Features "OpenSCAD User Manual/Other Language Features").
+details,](https://en.wikibooks.org/wiki/OpenSCAD_User_Manual/Other_Language_Features).
 
 #### Examples
 
@@ -3272,7 +3152,7 @@ rotate_extrude($fn = 200) polygon(points = [
 <https://upload.wikimedia.org/wikipedia/commons/thumb/e/ea/Openscad_polygon_extrusion_2.png/300px-Openscad_polygon_extrusion_2.png>
 
 For more information on polygons, please see: [2D Primitives:
-Polygon](https://en.wikibooks.org/wiki/OpenSCAD_User_Manual/2D_Primitives#polygon "OpenSCAD User Manual/2D Primitives").
+Polygon](https://en.wikibooks.org/wiki/OpenSCAD_User_Manual/2D_Primitives#polygon).
 */
 module rotate_extrude(angle=360, convexity=2) { builtin_flags(0000000000000001); }
 
@@ -3355,7 +3235,7 @@ render which is not manifold (with zero volume portions, or portions
 inside out), which typically leads to a warning and sometimes removal of
 a portion of the design from the rendered output. (This can also result
 in [flickering effects during the
-preview](https://en.wikibooks.org/wiki/OpenSCAD_User_Manual/FAQ#What_are_those_strange_flickering_artifacts_in_the_preview? "OpenSCAD User Manual/FAQ").)
+preview](https://en.wikibooks.org/wiki/OpenSCAD_User_Manual/FAQ#What_are_those_strange_flickering_artifacts_in_the_preview?).)
 This requirement is not a bug, but an intrinsic property of floating
 point comparisons and the fundamental inability to exactly represent
 irrational numbers such as those resulting from most rotations. As an
@@ -3491,19 +3371,9 @@ string.
 
 **Parameters**
 
-chr(Number)
-Convert one code point to a string of length 1 (number of bytes
-depending on UTF-8 encoding) if the code point is valid.
-
-<!-- -->
-
-chr(Vector)
-Convert all code points given in the argument vector to a string.
-
-<!-- -->
-
-chr(Range)
-Convert all code points produced by the range argument to a string.
+`chr(number)`: Convert one code point to a string of length 1 (number of bytes depending on UTF-8 encoding) if the code point is valid.
+`chr(vector)`: Convert all code points given in the argument vector to a string.
+`chr(range)`: Convert all code points produced by the range argument to a string.
 
 **Examples**
 
@@ -3591,9 +3461,7 @@ Mathematical **cosine** function of degrees. See [Cosine](https://en.wikipedia.o
 
 **Parameters**
 
-**degrees**
-
-Decimal. Angle in degrees.
+`degrees`: Decimal. Angle in degrees.
 
 **Usage Example:**
 
@@ -3970,11 +3838,8 @@ lookup table -- a vector of key-value pairs.
 
 **Parameters**
 
-key
-A lookup key
-
-<key,value> array
-keys and values
+`key`: A lookup key.
+`<key,value> array`: Keys and values.
 
 **Notes:**
 There is a bug in which out-of-range keys return the first value in the
@@ -4014,16 +3879,9 @@ parameter, returns the maximum element of that vector.
 
 ```scad
 max(n, n{, n}...) max(vector)
-
 ```
-
-**n**
-
-Two or more decimals
-
-**vector**
-
-Single vector of decimals [Note: Requires version 2014.06].
+`n`: Two or more decimals.
+`vector`: Single vector of decimals. [Note: Requires version 2014.06].
 
 **Usage Example:**
 
@@ -4051,16 +3909,9 @@ parameter, returns the minimum element of that vector.
 
 ```scad
 min(n, n{, n}...) min(vector)
-
 ```
-
-**n**
-
-Two or more decimals
-
-**vector**
-
-Single vector of decimals [Note: Requires version 2014.06].
+`n`: Two or more decimals.
+`vector`: Single vector of decimals. [Note: Requires version 2014.06].
 
 **Usage Example:**
 
@@ -4077,7 +3928,7 @@ min(3.0, 5.0) min(8.0, 3.0, 4.0, 5.0) min([ 8, 3, 4, 5 ])
 ```
 
 Looking for **mod** - it's not a function, see [modulo operator
-(%)](https://en.wikibooks.org/wiki/OpenSCAD_User_Manual/Mathematical_Operators "OpenSCAD User Manual/Mathematical Operators")
+(%)](https://en.wikibooks.org/wiki/OpenSCAD_User_Manual/Mathematical_Operators)
 */
 function min(args) = builtin_flags(0000000000000010);
 
@@ -4134,8 +3985,7 @@ the `ord()` returns `undef`.
 
 **Parameters**
 
-ord(String)
-Convert the first character of the given string to a Unicode code point.
+`ord(string)`: Convert the first character of the given string to a Unicode code point.
 
 **Examples**
 
@@ -4163,17 +4013,13 @@ function ord(c) = builtin_flags(0000000000000010);
 Mathematical **power** function.
 
 As of version 2021.01 you can use the [exponentiation operator
-`^`](https://en.wikibooks.org/wiki/OpenSCAD_User_Manual/Mathematical_Operators "OpenSCAD User Manual/Mathematical Operators")
+`^`](https://en.wikibooks.org/wiki/OpenSCAD_User_Manual/Mathematical_Operators)
 instead.
 
 **Parameters**
 
-<base>
-Decimal. Base.
-
-**exponent**
-
-Decimal. Exponent.
+`base`: Decimal. Base.
+`exponent`: Decimal. Exponent.
 
 **Usage examples:**
 
@@ -4212,19 +4058,10 @@ generating only one number, you still call it with variable[0]
 
 **Parameters**
 
-min_value
-Minimum value of random number range
-
-max_value
-Maximum value of random number range
-
-value_count
-Number of random numbers to return as a vector
-
-seed_value (optional)
-Seed value for random number generator for repeatable results. On
-versions before late 2015, seed_value gets rounded to the nearest
-integer
+`min_value`: Minimum value of random number range.
+`max_value`: Maximum value of random number range.
+`value_count`: Number of random numbers to return as a vector.
+`seed_value` (optional): Seed value for random number generator for repeatable results. On versions before late 2015, `seed_value` gets rounded to the nearest integer.
 
 **Usage Examples:**
 
@@ -4291,8 +4128,7 @@ sign of a value see:
 
 **Parameters**
 
-<x>
-Decimal. Value to find the sign of.
+`x`: Decimal. Value to find the sign of.
 
 **Usage examples:**
 
@@ -4319,9 +4155,7 @@ Mathematical **sine** function. See [Sine](https://en.wikipedia.org/wiki/Trigono
 
 **Parameters**
 
-**degrees**
-
-Decimal. Angle in degrees.
+`degrees`: Decimal. Angle in degrees.
 
 **Usage example 1:**
 
@@ -4395,10 +4229,10 @@ late 2015.
 
 Retrieved from "[https://en.wikibooks.org/w/index.php?title=OpenSCAD_User_Manual/Mathematical_Functions&oldid=4070836](https://en.wikibooks.org/w/index.php?title=OpenSCAD_User_Manual/Mathematical_Functions&oldid=4070836)"
 
-[Category](https://en.wikibooks.org/wiki/Special:Categories "Special:Categories"):
+[Category](https://en.wikibooks.org/wiki/Special:Categories):
 
 - [Book:OpenSCAD User
-  Manual](https://en.wikibooks.org/wiki/Category:Book:OpenSCAD_User_Manual "Category:Book:OpenSCAD User Manual")
+  Manual](https://en.wikibooks.org/wiki/Category:Book:OpenSCAD_User_Manual)
   */
   function sqrt(x) = builtin_flags(0000000000000010);
 
@@ -4431,9 +4265,7 @@ Mathematical **tangent** function. See [Tangent](https://en.wikipedia.org/wiki/T
 
 **Parameters**
 
-**degrees**
-
-Decimal. Angle in degrees.
+`degrees`: Decimal. Angle in degrees.
 
 **Usage example:**
 
