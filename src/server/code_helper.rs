@@ -1,4 +1,4 @@
-use std::{cell::RefCell, fs::read_to_string, io, rc::Rc};
+use std::{cell::RefCell, collections::HashSet, fs::read_to_string, io, rc::Rc};
 
 use lsp_types::Url;
 use tree_sitter::Node;
@@ -39,19 +39,45 @@ impl Server {
         comparator: &dyn Fn(&str) -> bool,
         start_node: &Node,
         findall: bool,
-        depth: i32,
+    ) -> Vec<Rc<RefCell<Item>>> {
+        let mut visited = HashSet::new();
+        let depth_limit = if self.args.depth == 0 {
+            None
+        } else {
+            Some(self.args.depth)
+        };
+        self.find_identities_inner(
+            code,
+            comparator,
+            start_node,
+            findall,
+            &mut visited,
+            true,
+            depth_limit,
+        )
+    }
+
+    fn find_identities_inner(
+        &mut self,
+        code: &ParsedCode,
+        comparator: &dyn Fn(&str) -> bool,
+        start_node: &Node,
+        findall: bool,
+        visited: &mut HashSet<Url>,
+        include_builtin: bool,
+        remaining_depth: Option<usize>,
     ) -> Vec<Rc<RefCell<Item>>> {
         let mut result: Vec<Rc<RefCell<Item>>> = vec![];
-        if depth >= self.args.depth {
+        if !visited.insert(code.url.clone()) {
             return result;
         }
 
         let mut include_vec = vec![];
-        if depth == 0 {
-            include_vec.push(self.builtin_url.clone())
+        if include_builtin && !visited.contains(&self.builtin_url) {
+            include_vec.push(self.builtin_url.clone());
         }
         if let Some(incs) = &code.includes {
-            include_vec.extend(incs.clone());
+            include_vec.extend(incs.iter().filter(|inc| !visited.contains(*inc)).cloned());
         }
 
         let mut node = *start_node;
@@ -137,6 +163,13 @@ impl Server {
         }
 
         for inc in include_vec {
+            if visited.contains(&inc) {
+                continue;
+            }
+            if let Some(0) = remaining_depth {
+                continue;
+            }
+
             let inccode = match self.get_code(&inc) {
                 Some(code) => code,
                 _ => return result,
@@ -144,12 +177,15 @@ impl Server {
 
             if let Ok(mut inccode) = inccode.try_borrow_mut() {
                 inccode.gen_top_level_items_if_needed();
-                result.extend(self.find_identities(
+                let next_depth = remaining_depth.map(|depth| depth - 1);
+                result.extend(self.find_identities_inner(
                     &inccode,
-                    &comparator,
+                    comparator,
                     &inccode.tree.root_node(),
                     findall,
-                    depth + 1,
+                    visited,
+                    false,
+                    next_depth,
                 ));
             }
 

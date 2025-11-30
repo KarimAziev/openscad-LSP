@@ -29,8 +29,12 @@ pub(crate) struct Cli {
     #[clap(long, help = "exclude default params in auto-completion")]
     ignore_default: bool,
 
-    #[clap(long, default_value_t = 3, help = "search depth")]
-    depth: i32,
+    #[clap(
+        long,
+        default_value_t = 0,
+        help = "maximum include depth to traverse (0 = unlimited)"
+    )]
+    depth: usize,
 
     #[clap(
         long,

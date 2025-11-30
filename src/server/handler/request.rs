@@ -56,7 +56,7 @@ impl Server {
         }
         let ident_name = node_text(&bfile.code, &node);
         let identifier_definition =
-            self.find_identities(&file.borrow(), &|name| name == ident_name, &node, false, 0);
+            self.find_identities(&file.borrow(), &|name| name == ident_name, &node, false);
 
         let definition = if let Some(def) = identifier_definition.first() {
             def
@@ -138,7 +138,6 @@ impl Server {
                 &|name| name == ident_initial_name,
                 &node,
                 false,
-                0,
             );
 
             let definition = if let Some(def) = identifier_definition.first() {
@@ -267,7 +266,6 @@ impl Server {
                     &|item_name| item_name == name,
                     &node,
                     false,
-                    0,
                 );
                 items.first().map(|item| Hover {
                     contents: HoverContents::Markup(MarkupContent {
@@ -316,7 +314,6 @@ impl Server {
                     &|item_name| item_name == name,
                     &node,
                     false,
-                    0,
                 );
                 let locs = items
                     .iter()
@@ -394,7 +391,7 @@ impl Server {
         let node = cursor.node();
         let name = node_text(&bfile.code, &node);
 
-        let mut items = self.find_identities(&file.borrow(), &|_| true, &node, true, 0);
+        let mut items = self.find_identities(&file.borrow(), &|_| true, &node, true);
 
         let kind = node.kind();
         if let Some(parent) = &node.parent().and_then(|parent| parent.parent()) {
@@ -422,7 +419,6 @@ impl Server {
                             &|item_name| item_name == name,
                             &node,
                             false,
-                            0,
                         );
 
                         if !fun_items.is_empty() {
