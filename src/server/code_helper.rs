@@ -1,6 +1,6 @@
 use std::{
     cell::RefCell,
-    collections::{HashSet, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     fs::read_to_string,
     io,
     rc::Rc,
@@ -60,6 +60,33 @@ impl Server {
             &mut visited,
             true,
             depth_limit,
+            None,
+        )
+    }
+
+    pub(crate) fn find_identities_with_cache(
+        &mut self,
+        code: &ParsedCode,
+        comparator: &dyn Fn(&str) -> bool,
+        start_node: &Node,
+        findall: bool,
+        cache: &RefCell<HashMap<Url, Vec<Rc<RefCell<Item>>>>>,
+    ) -> Vec<Rc<RefCell<Item>>> {
+        let mut visited = HashSet::new();
+        let depth_limit = if self.args.depth == 0 {
+            None
+        } else {
+            Some(self.args.depth)
+        };
+        self.find_identities_inner(
+            code,
+            comparator,
+            start_node,
+            findall,
+            &mut visited,
+            true,
+            depth_limit,
+            Some(cache),
         )
     }
 
@@ -72,6 +99,7 @@ impl Server {
         visited: &mut HashSet<Url>,
         include_builtin: bool,
         remaining_depth: Option<usize>,
+        cache: Option<&RefCell<HashMap<Url, Vec<Rc<RefCell<Item>>>>>>,
     ) -> Vec<Rc<RefCell<Item>>> {
         let mut result: Vec<Rc<RefCell<Item>>> = vec![];
         if !visited.insert(code.url.clone()) {
@@ -176,6 +204,19 @@ impl Server {
                 continue;
             }
 
+            if let Some(cache_cell) = cache {
+                if !findall {
+                    if let Some(cached) = cache_cell.borrow().get(&inc).cloned() {
+                        visited.insert(inc.clone());
+                        result.extend(cached);
+                        if !result.is_empty() && !findall {
+                            return result;
+                        }
+                        continue;
+                    }
+                }
+            }
+
             let inccode = match self.get_code(&inc) {
                 Some(code) => code,
                 _ => return result,
@@ -184,7 +225,7 @@ impl Server {
             if let Ok(mut inccode) = inccode.try_borrow_mut() {
                 inccode.gen_top_level_items_if_needed();
                 let next_depth = remaining_depth.map(|depth| depth - 1);
-                result.extend(self.find_identities_inner(
+                let nested = self.find_identities_inner(
                     &inccode,
                     comparator,
                     &inccode.tree.root_node(),
@@ -192,7 +233,14 @@ impl Server {
                     visited,
                     false,
                     next_depth,
-                ));
+                    cache,
+                );
+                if let Some(cache_cell) = cache {
+                    if !findall {
+                        cache_cell.borrow_mut().insert(inc.clone(), nested.clone());
+                    }
+                }
+                result.extend(nested);
             }
 
             if !result.is_empty() && !findall {
@@ -243,10 +291,6 @@ impl Server {
                     }
                 }
             }
-        }
-
-        for key in self.codes.keys() {
-            visited.insert(key.clone());
         }
 
         visited

@@ -1,6 +1,9 @@
+use ignore::{WalkBuilder, types::Types, types::TypesBuilder};
 use std::{
     cell::{Ref, RefCell},
-    collections::HashMap,
+    collections::{HashMap, HashSet},
+    fs,
+    path::{Path, PathBuf},
     rc::Rc,
 };
 
@@ -261,14 +264,15 @@ impl Server {
         }
 
         let base_seeds = vec![uri.clone(), definition_url.clone()];
-        let related_urls: Vec<Url> = {
-            let mut urls = self.collect_related_urls(&base_seeds);
-            urls.insert(definition_url.clone());
-            urls.insert(uri.clone());
-            urls.into_iter().collect()
-        };
+        let mut related_urls = self.collect_related_urls(&base_seeds);
+        related_urls.insert(definition_url.clone());
+        related_urls.insert(uri.clone());
+        let identifier_urls = self.collect_identifier_urls(&ident_initial_name, &base_seeds);
+        related_urls.extend(identifier_urls);
+        let related_urls: Vec<Url> = related_urls.into_iter().collect();
 
         let mut changes: HashMap<Url, Vec<TextEdit>> = HashMap::new();
+        let reference_cache = RefCell::new(HashMap::<Url, Vec<Rc<RefCell<Item>>>>::new());
 
         for url in related_urls {
             let code = match self.get_code(&url) {
@@ -279,23 +283,46 @@ impl Server {
                 code_mut.gen_top_level_items_if_needed();
             }
             let code_ref = code.borrow();
-            let cursor = code_ref.tree.walk();
-            let mut iter = traverse(cursor, Order::Pre);
+            if !code_ref.code.contains(ident_initial_name.as_str()) {
+                continue;
+            }
             let mut edits = vec![];
+            let ident_len = ident_initial_name.len();
+            let ident_bytes = ident_initial_name.as_bytes();
+            let mut idx = 0;
+            let code_str = &code_ref.code;
+            let code_bytes = code_str.as_bytes();
 
-            while let Some(node) = iter.next() {
+            while idx + ident_len <= code_bytes.len() {
+                if &code_bytes[idx..idx + ident_len] != ident_bytes {
+                    idx += 1;
+                    continue;
+                }
+                let abs_idx = idx;
+                let end_idx = abs_idx + ident_len;
+                let node_opt = code_ref
+                    .tree
+                    .root_node()
+                    .descendant_for_byte_range(abs_idx, end_idx);
+                let Some(node) = node_opt else {
+                    idx += 1;
+                    continue;
+                };
                 if node.kind() != "identifier" {
+                    idx += 1;
                     continue;
                 }
-                if node_text(&code_ref.code, &node) != ident_initial_name.as_str() {
+                if node_text(code_str, &node) != ident_initial_name.as_str() {
+                    idx += 1;
                     continue;
                 }
 
-                let resolved = self.find_identities(
+                let resolved = self.find_identities_with_cache(
                     &code_ref,
                     &|name| name == ident_initial_name.as_str(),
                     &node,
                     false,
+                    &reference_cache,
                 );
                 if let Some(item) = resolved.first() {
                     let item_ref = item.borrow();
@@ -311,6 +338,7 @@ impl Server {
                         });
                     }
                 }
+                idx = abs_idx + ident_len;
             }
 
             if !edits.is_empty() {
@@ -774,5 +802,166 @@ impl Server {
             result: Some(result),
             error: None,
         });
+    }
+
+    fn collect_identifier_urls(&mut self, ident: &str, seeds: &[Url]) -> HashSet<Url> {
+        if ident.is_empty() {
+            return HashSet::new();
+        }
+
+        if let Some(cached) = self.identifier_index.get(ident) {
+            return cached.clone();
+        }
+
+        let mut roots: HashSet<PathBuf> = HashSet::new();
+        for root in &self.workspace_roots {
+            if root.exists() {
+                roots.insert(root.clone());
+            }
+        }
+
+        let push_parent = |url: &Url, targets: &mut HashSet<PathBuf>| {
+            if let Ok(path) = url.to_file_path() {
+                if let Some(parent) = path.parent() {
+                    targets.insert(parent.to_path_buf());
+                }
+            }
+        };
+
+        for seed in seeds {
+            push_parent(seed, &mut roots);
+        }
+
+        for url in self.codes.keys() {
+            push_parent(url, &mut roots);
+        }
+
+        let library_dirs: Vec<PathBuf> = self
+            .library_locations
+            .borrow()
+            .iter()
+            .filter_map(|url| url.to_file_path().ok())
+            .collect();
+        roots.extend(library_dirs);
+
+        let types = Self::scad_types();
+        let mut visited_files: HashSet<PathBuf> = HashSet::new();
+        let mut found_urls: HashSet<Url> = HashSet::new();
+
+        for root in roots {
+            self.scan_directory_for_identifier(
+                &root,
+                ident,
+                &types,
+                &mut visited_files,
+                &mut found_urls,
+            );
+        }
+
+        for (url, code_rc) in self.codes.iter() {
+            if code_rc.borrow().code.contains(ident) {
+                found_urls.insert(url.clone());
+            }
+        }
+
+        self.identifier_index
+            .insert(ident.to_owned(), found_urls.clone());
+
+        found_urls
+    }
+
+    fn scan_directory_for_identifier(
+        &mut self,
+        dir: &Path,
+        ident: &str,
+        types: &Types,
+        visited_files: &mut HashSet<PathBuf>,
+        found_urls: &mut HashSet<Url>,
+    ) {
+        if !dir.exists() {
+            return;
+        }
+
+        let mut builder = WalkBuilder::new(dir);
+        builder.standard_filters(true);
+        builder.follow_links(false);
+        builder
+            .filter_entry(|entry| {
+                entry
+                    .file_type()
+                    .map(|ft| {
+                        if ft.is_dir() {
+                            !Self::should_skip_directory(entry.path())
+                        } else {
+                            true
+                        }
+                    })
+                    .unwrap_or(true)
+            })
+            .types(types.clone());
+
+        for result in builder.build() {
+            let entry = match result {
+                Ok(entry) => entry,
+                Err(_) => continue,
+            };
+
+            let file_type = match entry.file_type() {
+                Some(ft) => ft,
+                None => continue,
+            };
+
+            if !file_type.is_file() {
+                continue;
+            }
+
+            let path = entry.into_path();
+            if !visited_files.insert(path.clone()) {
+                continue;
+            }
+
+            let content = match fs::read_to_string(&path) {
+                Ok(text) => text,
+                Err(_) => continue,
+            };
+
+            if !content.contains(ident) {
+                continue;
+            }
+
+            if let Ok(url) = Url::from_file_path(&path) {
+                found_urls.insert(url.clone());
+                if let Some(code) = self.get_code(&url) {
+                    if let Ok(mut code_mut) = code.try_borrow_mut() {
+                        code_mut.gen_top_level_items_if_needed();
+                    }
+                }
+            }
+        }
+    }
+
+    fn scad_types() -> Types {
+        let mut builder = TypesBuilder::new();
+        builder.add("scad", "*.scad").expect("valid glob");
+        builder.select("scad");
+        builder.build().expect("build types")
+    }
+
+    fn should_skip_directory(path: &Path) -> bool {
+        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+            matches!(
+                name,
+                ".git"
+                    | ".hg"
+                    | ".svn"
+                    | "node_modules"
+                    | "target"
+                    | ".idea"
+                    | ".vscode"
+                    | "__pycache__"
+            )
+        } else {
+            false
+        }
     }
 }

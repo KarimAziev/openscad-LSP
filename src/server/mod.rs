@@ -6,6 +6,7 @@ pub(crate) mod parse_code;
 pub(crate) mod response_item;
 
 use directories::UserDirs;
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fs::read_to_string;
 use std::{cell::RefCell, env, path::PathBuf, rc::Rc};
@@ -13,8 +14,8 @@ use std::{cell::RefCell, env, path::PathBuf, rc::Rc};
 use linked_hash_map::LinkedHashMap;
 use lsp_server::Connection;
 use lsp_types::{
-    HoverProviderCapability, OneOf, RenameOptions, ServerCapabilities, TextDocumentSyncCapability,
-    TextDocumentSyncKind, Url, WorkDoneProgressOptions,
+    HoverProviderCapability, InitializeParams, OneOf, RenameOptions, ServerCapabilities,
+    TextDocumentSyncCapability, TextDocumentSyncKind, Url, WorkDoneProgressOptions,
 };
 
 use crate::Cli;
@@ -32,6 +33,8 @@ pub(crate) struct Server {
 
     builtin_url: Url,
     fmt_query: Option<String>,
+    pub(crate) workspace_roots: Vec<PathBuf>,
+    pub(crate) identifier_index: HashMap<String, HashSet<Url>>,
 }
 
 pub(crate) enum LoopAction {
@@ -86,6 +89,8 @@ impl Server {
             args,
             builtin_url: url.to_owned(),
             fmt_query,
+            workspace_roots: Vec::new(),
+            identifier_index: HashMap::new(),
         };
         let rc = instance.insert_code(url, code);
 
@@ -210,7 +215,9 @@ impl Server {
             })),
             ..Default::default()
         })?;
-        self.connection.initialize(caps)?;
+        let init_params = self.connection.initialize(caps)?;
+        let init: InitializeParams = serde_json::from_value(init_params)?;
+        self.workspace_roots = Self::extract_workspace_roots(&init);
         while let Ok(msg) = self.connection.receiver.recv() {
             match self.handle_message(msg)? {
                 LoopAction::Continue => {}
@@ -218,5 +225,40 @@ impl Server {
             }
         }
         Ok(())
+    }
+
+    fn extract_workspace_roots(params: &InitializeParams) -> Vec<PathBuf> {
+        let mut roots = Vec::new();
+
+        #[allow(deprecated)]
+        if let Some(root_uri) = params.root_uri.as_ref() {
+            if let Ok(path) = root_uri.to_file_path() {
+                if !roots.contains(&path) {
+                    roots.push(path);
+                }
+            }
+        } else if let Some(root_path) = {
+            #[allow(deprecated)]
+            {
+                params.root_path.as_ref()
+            }
+        } {
+            let path = PathBuf::from(root_path);
+            if !roots.contains(&path) {
+                roots.push(path);
+            }
+        }
+
+        if let Some(folders) = &params.workspace_folders {
+            for folder in folders {
+                if let Ok(path) = folder.uri.to_file_path() {
+                    if !roots.contains(&path) {
+                        roots.push(path);
+                    }
+                }
+            }
+        }
+
+        roots
     }
 }

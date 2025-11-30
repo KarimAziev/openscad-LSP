@@ -26,6 +26,7 @@ regex = "1.11.3"
 directories = "6.0.0"
 tree-sitter-traversal2 = "0.2.1"
 topiary-core = "0.6.1"
+ignore = "0.4"
 
 # The profile that 'dist' will build with
 [profile.dist]

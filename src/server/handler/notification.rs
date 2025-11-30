@@ -35,6 +35,9 @@ impl Server {
 
         pc.borrow_mut().edit(&content_changes);
 
+        // Any cached identifier index becomes stale after edits.
+        self.identifier_index.clear();
+
         let mut diags: Vec<_> = error_nodes(pc.borrow().tree.walk())
             .into_iter()
             .map(|node| Diagnostic {
@@ -135,6 +138,8 @@ impl Server {
             };
             self.fmt_query = Self::get_fmt_query(settings.openscad.query_file);
         }
+
+        self.identifier_index.clear();
     }
 
     pub(crate) fn handle_did_save_text_document(&mut self, _params: DidSaveTextDocumentParams) {}
