@@ -1,4 +1,10 @@
-use std::{cell::RefCell, collections::HashSet, fs::read_to_string, io, rc::Rc};
+use std::{
+    cell::RefCell,
+    collections::{HashSet, VecDeque},
+    fs::read_to_string,
+    io,
+    rc::Rc,
+};
 
 use lsp_types::Url;
 use tree_sitter::Node;
@@ -95,7 +101,7 @@ impl Server {
 
                 if let Some(mut item) = Item::parse(&code.code, &node) {
                     match &item.kind {
-                        ItemKind::Module { params, .. } => {
+                        ItemKind::Module { params } => {
                             for p in params {
                                 if comparator(&p.name) {
                                     result.push(Rc::new(RefCell::new(Item {
@@ -111,7 +117,7 @@ impl Server {
                                 }
                             }
                         }
-                        ItemKind::Function { flags: _, params } => {
+                        ItemKind::Function { params } => {
                             for p in params {
                                 if comparator(&p.name) {
                                     result.push(Rc::new(RefCell::new(Item {
@@ -210,5 +216,111 @@ impl Server {
             }
             linked_hash_map::Entry::Vacant(_) => Ok(self.insert_code(url, text)),
         }
+    }
+
+    pub(crate) fn collect_related_urls(&mut self, seeds: &[Url]) -> HashSet<Url> {
+        let mut visited = HashSet::new();
+        let mut queue: VecDeque<Url> = VecDeque::new();
+
+        for seed in seeds {
+            queue.push_back(seed.clone());
+        }
+
+        while let Some(url) = queue.pop_front() {
+            if !visited.insert(url.clone()) {
+                continue;
+            }
+
+            if let Some(code_rc) = self.get_code(&url) {
+                if let Ok(mut code_mut) = code_rc.try_borrow_mut() {
+                    code_mut.gen_top_level_items_if_needed();
+                    if let Some(includes) = &code_mut.includes {
+                        for inc in includes {
+                            if !visited.contains(inc) {
+                                queue.push_back(inc.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        for key in self.codes.keys() {
+            visited.insert(key.clone());
+        }
+
+        visited
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Cli;
+    use clap::Parser;
+    use lsp_server::Connection;
+    use lsp_types::Url;
+    use std::fs;
+    use tempfile::tempdir;
+    use tree_sitter_traversal2::{Order, traverse};
+
+    #[test]
+    fn find_identities_traverses_deep_include_graph() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path();
+
+        let files = [
+            "top.scad",
+            "lvl1.scad",
+            "lvl2.scad",
+            "lvl3.scad",
+            "lvl4.scad",
+        ];
+
+        for window in files.windows(2) {
+            let current = root.join(window[0]);
+            let next = window[1];
+            let content = format!("include <{next}>;\n");
+            fs::write(current, content).unwrap();
+        }
+
+        let leaf_path = root.join("lvl4.scad");
+        fs::write(&leaf_path, "module nested() {}\n").unwrap();
+
+        let top_path = root.join("top.scad");
+        let top_content = "include <lvl1.scad>;\nmodule top_use() { nested(); }\n";
+        fs::write(&top_path, top_content).unwrap();
+
+        let (server_conn, _client_conn) = Connection::memory();
+        let args = Cli::parse_from(["openscad-lsp"]);
+        let mut server = Server::new(server_conn, args);
+
+        let top_url = Url::from_file_path(&top_path).unwrap();
+        let top_code = server.get_code(&top_url).expect("load top.scad");
+        if let Ok(mut code_mut) = top_code.try_borrow_mut() {
+            code_mut.gen_top_level_items_if_needed();
+        }
+        let top_ref = top_code.borrow();
+
+        let cursor = top_ref.tree.walk();
+        let mut iter = traverse(cursor, Order::Pre);
+        let mut call_node = None;
+        while let Some(node) = iter.next() {
+            if node.kind() == "identifier" && super::node_text(&top_ref.code, &node) == "nested" {
+                call_node = Some(node);
+                break;
+            }
+        }
+        let call_node = call_node.expect("call site");
+
+        let results = server.find_identities(&top_ref, &|name| name == "nested", &call_node, false);
+
+        let leaf_url = Url::from_file_path(&leaf_path).unwrap();
+        assert!(
+            results
+                .iter()
+                .any(|item| item.borrow().url.as_ref() == Some(&leaf_url)),
+            "expected nested definition in deepest include"
+        );
     }
 }

@@ -10,7 +10,7 @@ use lsp_types::{
     DocumentFormattingParams, DocumentSymbolParams, DocumentSymbolResponse, Documentation,
     GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams,
     InsertTextFormat, InsertTextMode, Location, MarkupContent, Range, RenameParams,
-    SymbolInformation, TextDocumentPositionParams, TextEdit, WorkspaceEdit,
+    SymbolInformation, TextDocumentPositionParams, TextEdit, Url, WorkspaceEdit,
 };
 
 use tree_sitter::{Node, Point};
@@ -56,7 +56,7 @@ impl Server {
         }
         let ident_name = node_text(&bfile.code, &node);
         let identifier_definition =
-            self.find_identities(&file.borrow(), &|name| name == ident_name, &node, false);
+            self.find_identities(&bfile, &|name| name == ident_name, &node, false);
 
         let definition = if let Some(def) = identifier_definition.first() {
             def
@@ -69,26 +69,13 @@ impl Server {
             return;
         };
 
-        let url = if let Some(url) = definition.borrow().url.clone() {
-            url
-        } else {
-            self.respond(Response {
-                id,
-                result: None,
-                error: None,
-            });
-            return;
-        };
-
-        if url != uri {
+        if definition.borrow().url.is_none() {
             self.respond(Response {
                 id,
                 result: None,
                 error: Some(ResponseError {
                     code: 0,
-                    message:
-                        "Sorry, but renaming symbols defined in another file is not yet supported"
-                            .to_string(),
+                    message: "Cannot rename builtin".to_string(),
                     data: None,
                 }),
             });
@@ -115,10 +102,12 @@ impl Server {
             Some(code) => code,
             _ => return,
         };
-        file.borrow_mut().gen_top_level_items_if_needed();
-        let bfile = file.borrow();
+        if let Ok(mut file_mut) = file.try_borrow_mut() {
+            file_mut.gen_top_level_items_if_needed();
+        }
 
-        let (ident_initial_name, parent_scope, ident_initial_node) = {
+        let (ident_initial_name, identifier_definition) = {
+            let bfile = file.borrow();
             let node = get_node_at_point(&bfile, to_point(params.text_document_position.position));
             if node.kind() != "identifier" {
                 self.respond(Response {
@@ -132,103 +121,218 @@ impl Server {
                 });
                 return;
             }
-            let ident_initial_name = node_text(&bfile.code, &node);
+            let ident_initial_name = node_text(&bfile.code, &node).to_string();
             let identifier_definition = self.find_identities(
-                &file.borrow(),
-                &|name| name == ident_initial_name,
+                &bfile,
+                &|name| name == ident_initial_name.as_str(),
                 &node,
                 false,
             );
-
-            let definition = if let Some(def) = identifier_definition.first() {
-                def
-            } else {
-                self.respond(Response {
-                    id,
-                    result: None,
-                    error: Some(ResponseError {
-                        code: 0,
-                        message: "No definition found for this identifier".to_string(),
-                        data: None,
-                    }),
-                });
-                return;
-            };
-
-            let url = if let Some(url) = definition.borrow().url.clone() {
-                url
-            } else {
-                self.respond(Response {
-                    id,
-                    result: None,
-                    error: Some(ResponseError {
-                        code: 0,
-                        message: "Cannot rename builtin".to_string(),
-                        data: None,
-                    }),
-                });
-                return;
-            };
-
-            if url != uri {
-                self.respond(Response {
-                    id,
-                    result: None,
-                    error: Some(ResponseError {
-                        code: 0,
-                        message: "Sorry, but renaming symbols defined in another file is not yet supported".to_string(),
-                        data: None,
-                    }),
-                });
-                return;
-            }
-
-            let definition_node = get_node_at_point(
-                &bfile,
-                to_point(identifier_definition[0].borrow().range.start),
-            );
-            // unwrap here is fine because an identifier node should always have a parent scope
-            let parent_scope = find_node_scope(definition_node).unwrap();
-
-            (ident_initial_name, parent_scope, definition_node)
+            (ident_initial_name, identifier_definition)
         };
 
-        let mut node_iter = traverse(parent_scope.walk(), Order::Post);
-        let mut changes = vec![];
-        while let Some(node) = node_iter.next() {
-            let is_identifier_instance =
-                node.kind() != "identifier" || node_text(&bfile.code, &node) != ident_initial_name;
-            if is_identifier_instance {
-                continue;
-            }
-
-            let is_assignment = node
-                .parent()
-                .is_some_and(|node| node.kind() == "assignment");
-            let is_assignment_in_subscope = is_assignment && node != ident_initial_node;
-            if is_assignment_in_subscope {
-                // Unwrap is ok because an identifier node would always have a parent scope.
-                let scope = find_node_scope(node).unwrap();
-                // Consume iterator until it reaches the parent scope
-                while node_iter.next().is_some_and(|next| scope != next) {}
-                continue;
-            }
-
-            changes.push(TextEdit {
-                range: Range {
-                    start: to_position(node.start_position()),
-                    end: to_position(node.end_position()),
-                },
-                new_text: ident_new_name.to_string(),
+        let definition = if let Some(def) = identifier_definition.first() {
+            def
+        } else {
+            self.respond(Response {
+                id,
+                result: None,
+                error: Some(ResponseError {
+                    code: 0,
+                    message: "No definition found for this identifier".to_string(),
+                    data: None,
+                }),
             });
+            return;
+        };
+
+        let (definition_url_opt, definition_range, is_global_symbol) = {
+            let def = definition.borrow();
+            let is_global_symbol = match (&def.kind, def.is_top_level) {
+                (ItemKind::Function { .. }, _) | (ItemKind::Module { .. }, _) => true,
+                (ItemKind::Variable, true) => true,
+                _ => false,
+            };
+            (def.url.clone(), def.range.clone(), is_global_symbol)
+        };
+
+        let definition_url = if let Some(url) = definition_url_opt {
+            url
+        } else {
+            self.respond(Response {
+                id,
+                result: None,
+                error: Some(ResponseError {
+                    code: 0,
+                    message: "Cannot rename builtin".to_string(),
+                    data: None,
+                }),
+            });
+            return;
+        };
+
+        let def_code = match self.get_code(&definition_url) {
+            Some(code) => code,
+            _ => {
+                self.respond(Response {
+                    id,
+                    result: None,
+                    error: Some(ResponseError {
+                        code: 0,
+                        message: "Definition file is not available".to_string(),
+                        data: None,
+                    }),
+                });
+                return;
+            }
+        };
+        if let Ok(mut code_mut) = def_code.try_borrow_mut() {
+            code_mut.gen_top_level_items_if_needed();
+        }
+
+        if !is_global_symbol {
+            let changes = {
+                let def_file = def_code.borrow();
+                let definition_node =
+                    get_node_at_point(&def_file, to_point(definition_range.start));
+                // unwrap here is fine because an identifier node should always have a parent scope
+                let parent_scope = find_node_scope(definition_node).unwrap();
+                let ident_initial_node = definition_node;
+
+                let mut node_iter = traverse(parent_scope.walk(), Order::Post);
+                let mut edits = vec![];
+                while let Some(node) = node_iter.next() {
+                    let is_identifier_instance = node.kind() != "identifier"
+                        || node_text(&def_file.code, &node) != ident_initial_name.as_str();
+                    if is_identifier_instance {
+                        continue;
+                    }
+
+                    let is_assignment = node
+                        .parent()
+                        .is_some_and(|node| node.kind() == "assignment");
+                    let is_assignment_in_subscope = is_assignment && node != ident_initial_node;
+                    if is_assignment_in_subscope {
+                        // Unwrap is ok because an identifier node would always have a parent scope.
+                        let scope = find_node_scope(node).unwrap();
+                        // Consume iterator until it reaches the parent scope
+                        while node_iter.next().is_some_and(|next| scope != next) {}
+                        continue;
+                    }
+
+                    edits.push(TextEdit {
+                        range: Range {
+                            start: to_position(node.start_position()),
+                            end: to_position(node.end_position()),
+                        },
+                        new_text: ident_new_name.clone(),
+                    });
+                }
+                edits
+            };
+
+            if changes.is_empty() {
+                self.respond(Response {
+                    id,
+                    result: None,
+                    error: Some(ResponseError {
+                        code: 0,
+                        message: "No renamable references found for this symbol".to_string(),
+                        data: None,
+                    }),
+                });
+                return;
+            }
+
+            let mut changes_map = HashMap::new();
+            changes_map.insert(definition_url, changes);
+
+            let result = WorkspaceEdit {
+                changes: Some(changes_map),
+                ..Default::default()
+            };
+
+            self.respond(Response {
+                id,
+                result: Some(serde_json::to_value(result).unwrap()),
+                error: None,
+            });
+            return;
+        }
+
+        let base_seeds = vec![uri.clone(), definition_url.clone()];
+        let related_urls: Vec<Url> = {
+            let mut urls = self.collect_related_urls(&base_seeds);
+            urls.insert(definition_url.clone());
+            urls.insert(uri.clone());
+            urls.into_iter().collect()
+        };
+
+        let mut changes: HashMap<Url, Vec<TextEdit>> = HashMap::new();
+
+        for url in related_urls {
+            let code = match self.get_code(&url) {
+                Some(code) => code,
+                None => continue,
+            };
+            if let Ok(mut code_mut) = code.try_borrow_mut() {
+                code_mut.gen_top_level_items_if_needed();
+            }
+            let code_ref = code.borrow();
+            let cursor = code_ref.tree.walk();
+            let mut iter = traverse(cursor, Order::Pre);
+            let mut edits = vec![];
+
+            while let Some(node) = iter.next() {
+                if node.kind() != "identifier" {
+                    continue;
+                }
+                if node_text(&code_ref.code, &node) != ident_initial_name.as_str() {
+                    continue;
+                }
+
+                let resolved = self.find_identities(
+                    &code_ref,
+                    &|name| name == ident_initial_name.as_str(),
+                    &node,
+                    false,
+                );
+                if let Some(item) = resolved.first() {
+                    let item_ref = item.borrow();
+                    if item_ref.url.as_ref() == Some(&definition_url)
+                        && item_ref.range == definition_range
+                    {
+                        edits.push(TextEdit {
+                            range: Range {
+                                start: to_position(node.start_position()),
+                                end: to_position(node.end_position()),
+                            },
+                            new_text: ident_new_name.clone(),
+                        });
+                    }
+                }
+            }
+
+            if !edits.is_empty() {
+                changes.insert(url, edits);
+            }
+        }
+
+        if changes.is_empty() {
+            self.respond(Response {
+                id,
+                result: None,
+                error: Some(ResponseError {
+                    code: 0,
+                    message: "No renamable references found for this symbol".to_string(),
+                    data: None,
+                }),
+            });
+            return;
         }
 
         let result = WorkspaceEdit {
-            changes: Some({
-                let mut h = HashMap::new();
-                h.insert(uri, changes);
-                h
-            }),
+            changes: Some(changes),
             ..Default::default()
         };
 
@@ -391,7 +495,7 @@ impl Server {
         let node = cursor.node();
         let name = node_text(&bfile.code, &node);
 
-        let mut items = self.find_identities(&file.borrow(), &|_| true, &node, true);
+        let mut items = self.find_identities(&*bfile, &|_| true, &node, true);
 
         let kind = node.kind();
         if let Some(parent) = &node.parent().and_then(|parent| parent.parent()) {
@@ -415,7 +519,7 @@ impl Server {
                     .map(|child| node_text(&bfile.code, &child))
                     .map(|name| {
                         let fun_items = self.find_identities(
-                            &file.borrow(),
+                            &*bfile,
                             &|item_name| item_name == name,
                             &node,
                             false,
@@ -425,7 +529,7 @@ impl Server {
                             let item = &fun_items[0];
 
                             let param_items = match &item.borrow().kind {
-                                ItemKind::Module { params, .. } => {
+                                ItemKind::Module { params } => {
                                     let mut result = vec![];
                                     for p in params {
                                         result.push(Rc::new(RefCell::new(Item {
@@ -438,7 +542,7 @@ impl Server {
                                     }
                                     result
                                 }
-                                ItemKind::Function { flags: _, params } => {
+                                ItemKind::Function { params } => {
                                     let mut result = vec![];
                                     for p in params {
                                         result.push(Rc::new(RefCell::new(Item {
@@ -461,6 +565,52 @@ impl Server {
                     });
             }
         }
+
+        let builtin_url = self.builtin_url.clone();
+        if !items.iter().any(|item| item.borrow().is_builtin) {
+            if let Some(builtin_code) = self.get_code(&builtin_url) {
+                if let Ok(mut builtin_mut) = builtin_code.try_borrow_mut() {
+                    builtin_mut.gen_top_level_items_if_needed();
+                }
+                if let Ok(builtin_ref) = builtin_code.try_borrow() {
+                    if let Some(root_items) = &builtin_ref.root_items {
+                        items.extend(root_items.iter().cloned());
+                    }
+                }
+            }
+        }
+
+        let original_items = items;
+        let mut unique_items: Vec<Rc<RefCell<Item>>> = Vec::new();
+        let mut key_positions: HashMap<(String, u8), usize> = HashMap::new();
+
+        for item in original_items {
+            let (key, is_builtin) = {
+                let item_ref = item.borrow();
+                let kind_tag = match &item_ref.kind {
+                    ItemKind::Variable => 0,
+                    ItemKind::Function { .. } => 1,
+                    ItemKind::Keyword => 2,
+                    ItemKind::Module { .. } => 3,
+                };
+                ((item_ref.name.clone(), kind_tag), item_ref.is_builtin)
+            };
+
+            if let Some(idx) = key_positions.get(&key) {
+                let replace = {
+                    let existing = unique_items[*idx].borrow();
+                    existing.is_builtin && !is_builtin
+                };
+                if replace {
+                    unique_items[*idx] = Rc::clone(&item);
+                }
+            } else {
+                key_positions.insert(key, unique_items.len());
+                unique_items.push(Rc::clone(&item));
+            }
+        }
+
+        let items = unique_items;
 
         let result = if kind == "include_path"
             || node
@@ -491,29 +641,39 @@ impl Server {
                     .collect(),
             })
         } else {
+            let include_defaults = self.args.include_default_params;
             CompletionResponse::List(CompletionList {
                 is_incomplete: true,
                 items: items
                     .iter()
                     .map(|item| {
-                        let label = item.borrow_mut().get_label();
-                        let snippet = item.borrow_mut().get_snippet(&self.args);
+                        let mut item_mut = item.borrow_mut();
+                        let label = item_mut.name.clone();
+                        let insert_text = item_mut.completion_text();
+                        let completion_kind = item_mut.kind.completion_kind();
+                        let filter_text = item_mut.name.clone();
+                        let detail = item_mut.signature(include_defaults);
+                        let hover = item_mut.get_hover();
+                        drop(item_mut);
+
+                        let documentation = if hover.trim().is_empty() {
+                            None
+                        } else {
+                            Some(Documentation::MarkupContent(MarkupContent {
+                                kind: lsp_types::MarkupKind::Markdown,
+                                value: hover,
+                            }))
+                        };
+
                         CompletionItem {
                             label,
-                            kind: Some(item.borrow().kind.completion_kind()),
-                            filter_text: Some(item.borrow().name.to_owned()),
-                            insert_text: Some(snippet),
-                            insert_text_format: Some(match item.borrow().kind {
-                                ItemKind::Variable => InsertTextFormat::PLAIN_TEXT,
-                                _ => InsertTextFormat::SNIPPET,
-                            }),
+                            kind: Some(completion_kind),
+                            filter_text: Some(filter_text),
+                            insert_text: Some(insert_text),
+                            insert_text_format: Some(InsertTextFormat::PLAIN_TEXT),
                             insert_text_mode: Some(InsertTextMode::ADJUST_INDENTATION),
-                            documentation: item.borrow().hover.as_ref().map(|doc| {
-                                Documentation::MarkupContent(MarkupContent {
-                                    kind: lsp_types::MarkupKind::Markdown,
-                                    value: doc.to_owned(),
-                                })
-                            }),
+                            detail,
+                            documentation,
                             ..Default::default()
                         }
                     })

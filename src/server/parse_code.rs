@@ -8,19 +8,19 @@ use crate::response_item::{Item, ItemKind};
 use crate::utils::*;
 use regex::Regex;
 
-const KEYWORDS: &[(&str, &str)] = &[
-    ("else", "else {  $0\n}"),
-    ("false", "false"),
-    ("for", "for (${1:LOOP}) {\n  $0\n}"),
-    ("function", "function ${1:NAME}(${2:ARGS}) = $0;"),
-    ("if", "if (${1:COND}) {\n  $0\n}"),
-    ("include", "include <${1:PATH}>$0"),
-    ("intersection_for", "intersection_for(${1:LOOP}) {\n  $0\n}"),
-    ("let", "let (${1:VARS}) $0"),
-    ("module", "module ${1:NAME}(${2:ARGS}) {\n  $0\n}"),
-    ("true", "true"),
-    ("use", "use <${1:PATH}>$0"),
-    ("each", "each ${1:LIST}$0"),
+const KEYWORDS: &[&str] = &[
+    "else",
+    "false",
+    "for",
+    "function",
+    "if",
+    "include",
+    "intersection_for",
+    "let",
+    "module",
+    "true",
+    "use",
+    "each",
 ];
 
 pub(crate) struct ParsedCode {
@@ -173,6 +173,7 @@ impl ParsedCode {
                     if !self.is_builtin || self.external_builtin {
                         item.url = Some(self.url.clone());
                     }
+                    item.is_top_level = true;
                     item.doc = doc
                         .as_ref()
                         .map(|doc| self.extract_doc(doc, self.is_builtin));
@@ -193,9 +194,10 @@ impl ParsedCode {
         });
 
         if self.is_builtin {
-            ret.extend(KEYWORDS.iter().map(|&(name, comp)| Item {
+            ret.extend(KEYWORDS.iter().map(|&name| Item {
                 name: name.to_owned(),
-                kind: ItemKind::Keyword(comp.to_owned()),
+                kind: ItemKind::Keyword,
+                is_top_level: true,
                 ..Default::default()
             }));
         }

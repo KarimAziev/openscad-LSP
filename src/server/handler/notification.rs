@@ -120,7 +120,7 @@ impl Server {
             self.extend_libs(paths);
 
             if let Some(default_param) = settings.openscad.default_param {
-                self.args.ignore_default = !default_param;
+                self.args.include_default_params = default_param;
             }
 
             self.args.indent = match settings.openscad.indent {
