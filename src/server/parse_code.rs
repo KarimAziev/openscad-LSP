@@ -1,12 +1,10 @@
 use std::{cell::RefCell, path::PathBuf, rc::Rc};
 
-use lazy_static::lazy_static;
 use lsp_types::{TextDocumentContentChangeEvent, Url};
 use tree_sitter::{InputEdit, Node, Point, Tree, TreeCursor};
 
 use crate::response_item::{Item, ItemKind};
 use crate::utils::*;
-use regex::Regex;
 
 const KEYWORDS: &[&str] = &[
     "else",
@@ -22,6 +20,42 @@ const KEYWORDS: &[&str] = &[
     "use",
     "each",
 ];
+
+fn clean_doc_text(doc: &str, _builtin: bool) -> String {
+    let mut lines: Vec<String> = doc
+        .lines()
+        .map(|line| {
+            let mut line = line.trim_start();
+
+            if line.starts_with("/*") {
+                line = line.trim_start_matches('/').trim_start_matches('*').trim_start();
+            } else if line.starts_with("//") {
+                line = line.trim_start_matches('/').trim_start();
+            }
+
+            line = line.trim_end();
+            if let Some(stripped) = line.strip_suffix("*/") {
+                line = stripped.trim_end();
+            }
+
+            if line.starts_with('*') {
+                line = line.trim_start_matches('*').trim_start();
+            }
+
+            line.to_owned()
+        })
+        .collect();
+
+    while matches!(lines.first(), Some(line) if line.trim().is_empty()) {
+        lines.remove(0);
+    }
+
+    while matches!(lines.last(), Some(line) if line.trim().is_empty()) {
+        lines.pop();
+    }
+
+    lines.join("\n")
+}
 
 pub(crate) struct ParsedCode {
     pub parser: tree_sitter::Parser,
@@ -110,17 +144,7 @@ impl ParsedCode {
     }
 
     pub(crate) fn extract_doc(&self, doc: &str, builtin: bool) -> String {
-        lazy_static! {
-            static ref DOC_RE: Regex =
-                Regex::new(r"(?m)(^\s*//+)|(^\s*/\*+\n?)|(\*+/)|(^\s* )").unwrap();
-            static ref BTI_RE: Regex = Regex::new(r"(?m)(^\s*/\*+\n?)|(\*+/)").unwrap();
-        };
-
-        if builtin {
-            BTI_RE.replace_all(doc, "").to_string()
-        } else {
-            DOC_RE.replace_all(doc, "").to_string()
-        }
+        clean_doc_text(doc, builtin)
     }
 
     pub(crate) fn gen_top_level_items(&mut self) {
@@ -297,5 +321,25 @@ impl ParsedCode {
         }
 
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::clean_doc_text;
+
+    #[test]
+    fn strips_docblock_asterisks_and_keeps_structure() {
+        let raw = "/**\n * header line\n *\n * second paragraph line\n * - bullet one\n * - bullet two\n */";
+        let expected = "header line\n\nsecond paragraph line\n- bullet one\n- bullet two";
+        assert_eq!(clean_doc_text(raw, false), expected);
+    }
+
+    #[test]
+    fn preserves_newlines_in_indented_block_comments() {
+        let raw =
+            "/**\n  header line\n  \n  description line\n  - bullet one\n  - bullet two\n*/";
+        let expected = "header line\n\ndescription line\n- bullet one\n- bullet two";
+        assert_eq!(clean_doc_text(raw, false), expected);
     }
 }

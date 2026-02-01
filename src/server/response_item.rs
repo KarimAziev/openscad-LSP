@@ -121,11 +121,7 @@ impl Item {
             _ => format!("```scad\n{label}\n```"),
         };
         if let Some(doc) = &self.doc {
-            if self.is_builtin {
-                label = format!("{label}\n---\n\n{doc}\n");
-            } else {
-                label = format!("{label}\n---\n\n<pre>\n{doc}\n</pre>\n");
-            }
+            label = format!("{label}\n---\n\n{doc}\n");
         }
         // print!("{}", &label);
         label
