@@ -508,20 +508,13 @@ impl Server {
         file.borrow_mut().gen_top_level_items_if_needed();
 
         let mut point = to_point(pos);
-
-        if point.column > 0 {
-            point.column -= 1;
-        } else {
-            point.row -= 1;
-        }
-
         let bfile = file.borrow();
-        let mut cursor = bfile.tree.root_node().walk();
 
-        while cursor.goto_first_child_for_point(point).is_some() {}
-
-        let node = cursor.node();
-        let name = node_text(&bfile.code, &node);
+        let mut node = get_node_at_point(&bfile, point);
+        if node.kind() == "source_file" && point.column > 0 {
+            point.column -= 1;
+            node = get_node_at_point(&bfile, point);
+        }
 
         let mut items = self.find_identities(&*bfile, &|_| true, &node, true);
 
@@ -640,27 +633,32 @@ impl Server {
 
         let items = unique_items;
 
-        let result = if kind == "include_path"
-            || node
-                .prev_sibling()
-                .map(|sib| {
-                    if sib.kind() == "include" || sib.kind() == "use" {
-                        Some(true)
-                    } else {
-                        None
-                    }
-                })
-                .is_some()
-        {
+        let include_node = if kind == "include_path" {
+            Some(node)
+        } else {
+            let mut parent = node.parent();
+            let mut include = None;
+            while let Some(pnode) = parent {
+                if pnode.kind().is_include_statement() {
+                    include = pnode.child(1);
+                    break;
+                }
+                parent = pnode.parent();
+            }
+            include
+        };
+
+        let result = if let Some(include_node) = include_node {
+            let include_path = node_text(&bfile.code, &include_node).to_owned();
             CompletionResponse::List(CompletionList {
                 is_incomplete: true,
                 items: bfile
-                    .get_include_completion(&node)
+                    .get_include_completion(&include_node)
                     .iter()
                     .map(|file_name| CompletionItem {
                         label: file_name.clone(),
                         kind: Some(CompletionItemKind::FILE),
-                        filter_text: Some(name.to_owned()),
+                        filter_text: Some(include_path.clone()),
                         insert_text: Some(file_name.clone()),
                         insert_text_format: Some(InsertTextFormat::PLAIN_TEXT),
                         insert_text_mode: Some(InsertTextMode::ADJUST_INDENTATION),
