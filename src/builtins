@@ -4283,3 +4283,35 @@ function tan(x) = builtin_flags(0000000000000010);
 function version() = builtin_flags(0000000000000010);
 
 function version_num() = builtin_flags(0000000000000010);
+
+/**
+
+`roof()` generates a chamfer of `45°` over 2D child polygons. It is constructed via *voronoi* or straight point mesh generation.
+
+`roof(method = ["straight" | "voronoi"], convexity = N) { children };`
+
+**Parameters**
+
+`method`: `"straight"` or `"voronoi"`. The `"voronoi"` (default) setting produces rounded curves where the polygon corners are concave. For convex polygons, there is no difference between `"straight"` and `"voronoi"`.
+`convexity`: Integer. The convexity parameter specifies the maximum number of faces a ray intersecting the object might penetrate. This parameter is needed only for correct display of the object in OpenCSG preview mode. It has no effect on the polyhedron rendering. For display problems, setting it to `10` should work fine for most cases.
+
+
+```scad
+defaults : roof() square(10);
+yields : roof(method = "voronoi", convexity = 1) square(10);
+
+```
+
+**Usage examples:**
+
+
+```scad
+# beveled text
+$fa=1; $fs=0.4;
+intersection() {
+  cube([100,100,2],true);
+  scale([1,1,3]) roof(convexity=6) text("Wow");
+}
+```
+*/
+module roof(method = ["straight" | "voronoi"], convexity = N) { children };
