@@ -1,25 +1,44 @@
-# openscad-LSP
+# About
 
-A [LSP](https://microsoft.github.io/language-server-protocol/) (Language Server Protocol)
-server for [OpenSCAD](https://openscad.org).
+**Table of Contents**
 
-inspired by [dzhu/openscad-language-server](https://github.com/dzhu/openscad-language-server)
+> - [About](#about)
+>   - [Features](#features)
+>   - [IDE plugins](#ide-plugins)
+>   - [Install](#install)
+>   - [Build](#build)
+>   - [Usage](#usage)
 
-Tested with VSCode on Mac and Windows. [[vscode extension]](https://github.com/Leathong/openscad-support-vscode)
+Fork of [dzhu/openscad-language-server](https://github.com/dzhu/openscad-language-server), focused on improving OpenSCAD editing for larger projects and day-to-day IDE workflows.
 
-Tested with lsp-mode on Emacs on Linux by [@Lenbok](https://github.com/Lenbok).
+Main differences in this fork:
+
+- workspace-scale symbol/rename support with identifier indexing and caching
+- configurable include traversal depth for symbol resolution (`--depth`, where `0` means unlimited)
+- improved completion behavior, including better deduplication and callable parameter suggestions
+- corrected `Go to Definition` behavior for parameter defaults like `p = p` (RHS resolves to outer scope)
+- refreshed builtin documentation and cleaner parser-based extraction of comment docs
+
+Compatibility notes:
+
+- Tested with VSCode on Mac and Windows.
+- [VSCode extension](https://github.com/Leathong/openscad-support-vscode)
+- Tested with lsp-mode on Emacs on Linux by [@Lenbok](https://github.com/Lenbok).
 
 ## Features
 
-- builtin function/module documents
-- code and path auto-completion
+- builtin function/module documentation (bundled docs, including `roof()`)
+- code and include-path completion
+- completion docs/signatures and callable parameter-name suggestions
 - jump to definition
+- correct definition lookup for parameter defaults like `p = p` (RHS resolves to outer scope)
 - code snippets
 - function/module signatures on hover
 - document symbols
-- formatter, utilizing topiary.
-- variable / module renaming
-- hover and suggestion documentation, read from comments before the function/module.</br>
+- formatter using Topiary
+- variable/module renaming (local scope and workspace/include-aware for global symbols)
+- indexed/cached identifier lookup for workspace-scale rename/reference resolution
+- hover and suggestion documentation from comments before function/module declarations
 
 ## IDE plugins
 
@@ -35,15 +54,27 @@ Tested with lsp-mode on Emacs on Linux by [@Lenbok](https://github.com/Lenbok).
 openscad-LSP is written in [Rust](https://rust-lang.org), in order to use it, you need to
 install [Rust toolchain](https://www.rust-lang.org/learn/get-started).
 
-```{.sh}
+```sh
+make install-local
+```
+
+Equivalent direct command:
+
+```sh
 cargo install --path . --locked --force
 ```
 
 ## Build
 
-```{.sh}
+```sh
 cd openscad-LSP
 cargo build --release
+```
+
+Cross-platform release archives via Makefile:
+
+```sh
+make build
 ```
 
 ## Usage
@@ -58,20 +89,20 @@ Usage: openscad-lsp [OPTIONS]
 Options:
   -p, --port <PORT>              [default: 3245]
       --ip <IP>                  [default: 127.0.0.1]
-      --builtin <BUILTIN>        external builtin functions file path, if set, the built-in builtin functions file will not be used [default: ]
+      --builtin <BUILTIN>        external builtin functions file path, if not set, the built-in file will be used [default: ]
       --stdio                    use stdio instead of tcp
-      --ignore-default           exclude default params in auto-completion
-      --depth <DEPTH>            search depth [default: 3]
-      --indent <INDENT>          The indentation string used for that particular language. Defaults to "  " if not provided. Any string can be provided, but in most instances will be some whitespace: "  ", "    ", or "\t"
+      --include-default-params   include default params in auto-completion
+      --depth <DEPTH>            maximum include depth to traverse (0 = unlimited) [default: 0]
+      --indent <INDENT>          The indentation string used for that particular language. Defaults to "  " if not provided. Any string can be provided, but in most instances will be some whitespace: "  ", "    ", or "\t". [default: "  "]
       --query-file <QUERY_FILE>  The query file used for topiary formatting
   -h, --help                     Print help
   -V, --version                  Print version
 ```
 
 To change the config at runtime, you can send notification `workspace/didChangeConfiguration`
+(`search_paths` should use your platform path separator, e.g. `:` on Unix/macOS, `;` on Windows):
 
 ```jsonc
-// example
 {
   "settings": {
     "openscad": {
