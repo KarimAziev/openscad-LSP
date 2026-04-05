@@ -1,5 +1,3 @@
-> **NOTICE: Because clang-format produces poor formatting results for OpenSCAD, we have completely removed support for clang-format and switched to the new formatter [topiary](https://github.com/tweag/topiary)**
-
 # openscad-LSP
 
 A [LSP](https://microsoft.github.io/language-server-protocol/) (Language Server Protocol)
