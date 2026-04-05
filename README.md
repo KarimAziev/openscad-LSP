@@ -1,14 +1,5 @@
 # About
 
-**Table of Contents**
-
-> - [About](#about)
->   - [Features](#features)
->   - [IDE plugins](#ide-plugins)
->   - [Install](#install)
->   - [Build](#build)
->   - [Usage](#usage)
-
 Fork of [dzhu/openscad-language-server](https://github.com/dzhu/openscad-language-server), focused on improving OpenSCAD editing for larger projects and day-to-day IDE workflows.
 
 Main differences in this fork:
@@ -19,11 +10,12 @@ Main differences in this fork:
 - corrected `Go to Definition` behavior for parameter defaults like `p = p` (RHS resolves to outer scope)
 - refreshed builtin documentation and cleaner parser-based extraction of comment docs
 
-Compatibility notes:
-
-- Tested with VSCode on Mac and Windows.
-- [VSCode extension](https://github.com/Leathong/openscad-support-vscode)
-- Tested with lsp-mode on Emacs on Linux by [@Lenbok](https://github.com/Lenbok).
+> - [About](#about)
+>   - [Features](#features)
+>   - [IDE plugins](#ide-plugins)
+>   - [Install](#install)
+>   - [Build](#build)
+>   - [Usage](#usage)
 
 ## Features
 
