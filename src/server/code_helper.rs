@@ -90,6 +90,60 @@ impl Server {
         )
     }
 
+    fn parameter_default_context(
+        code: &ParsedCode,
+        start_node: &Node,
+    ) -> Option<(String, std::ops::Range<usize>)> {
+        let mut node = *start_node;
+
+        while let Some(parent) = node.parent() {
+            if parent.kind() == "assignment" {
+                let in_value = parent.child_by_field_name("value").is_some_and(|value| {
+                    let value_range = value.byte_range();
+                    let node_range = node.byte_range();
+                    value_range.start <= node_range.start && node_range.end <= value_range.end
+                });
+
+                if in_value {
+                    let Some(parameter) = parent.parent() else {
+                        return None;
+                    };
+                    if parameter.kind() != "parameter" {
+                        return None;
+                    }
+
+                    let Some(parameters) = parameter.parent() else {
+                        return None;
+                    };
+                    if parameters.kind() != "parameters" {
+                        return None;
+                    }
+
+                    let Some(owner) = parameters.parent() else {
+                        return None;
+                    };
+                    if owner.kind() != "module_item" && owner.kind() != "function_item" {
+                        return None;
+                    }
+
+                    let name_node = parent.child_by_field_name("name")?;
+                    if name_node.kind() != "identifier" {
+                        return None;
+                    }
+
+                    return Some((
+                        node_text(&code.code, &name_node).to_owned(),
+                        owner.byte_range(),
+                    ));
+                }
+            }
+
+            node = parent;
+        }
+
+        None
+    }
+
     fn find_identities_inner(
         &mut self,
         code: &ParsedCode,
@@ -105,6 +159,12 @@ impl Server {
         if !visited.insert(code.url.clone()) {
             return result;
         }
+
+        let parameter_default_context = if findall {
+            None
+        } else {
+            Self::parameter_default_context(code, start_node)
+        };
 
         let mut include_vec = vec![];
         if include_builtin && !visited.contains(&self.builtin_url) {
@@ -130,7 +190,15 @@ impl Server {
                 if let Some(mut item) = Item::parse(&code.code, &node) {
                     match &item.kind {
                         ItemKind::Module { params } => {
+                            let skip_param_name = parameter_default_context.as_ref().and_then(
+                                |(name, owner_range)| {
+                                    (node.byte_range() == *owner_range).then_some(name.as_str())
+                                },
+                            );
                             for p in params {
+                                if skip_param_name.is_some_and(|name| p.name == name) {
+                                    continue;
+                                }
                                 if comparator(&p.name) {
                                     result.push(Rc::new(RefCell::new(Item {
                                         name: p.name.clone(),
@@ -146,7 +214,15 @@ impl Server {
                             }
                         }
                         ItemKind::Function { params } => {
+                            let skip_param_name = parameter_default_context.as_ref().and_then(
+                                |(name, owner_range)| {
+                                    (node.byte_range() == *owner_range).then_some(name.as_str())
+                                },
+                            );
                             for p in params {
+                                if skip_param_name.is_some_and(|name| p.name == name) {
+                                    continue;
+                                }
                                 if comparator(&p.name) {
                                     result.push(Rc::new(RefCell::new(Item {
                                         name: p.name.clone(),
@@ -366,5 +442,150 @@ mod tests {
                 .any(|item| item.borrow().url.as_ref() == Some(&leaf_url)),
             "expected nested definition in deepest include"
         );
+    }
+
+    #[test]
+    fn parameter_default_self_reference_resolves_to_outer_variable() {
+        let tmp = tempdir().unwrap();
+        let file_path = tmp.path().join("main.scad");
+        let source = "show_ackermann_plate = false;\nmodule upper_chassis(show_ackermann_plate=show_ackermann_plate) {}\n";
+        fs::write(&file_path, source).unwrap();
+
+        let (server_conn, _client_conn) = Connection::memory();
+        let args = Cli::parse_from(["openscad-lsp"]);
+        let mut server = Server::new(server_conn, args);
+
+        let file_url = Url::from_file_path(&file_path).unwrap();
+        let parsed = server.get_code(&file_url).expect("load test file");
+        if let Ok(mut parsed_mut) = parsed.try_borrow_mut() {
+            parsed_mut.gen_top_level_items_if_needed();
+        }
+        let parsed_ref = parsed.borrow();
+
+        let mut rhs_node = None;
+        let mut outer_var_range = None;
+
+        let mut iter = traverse(parsed_ref.tree.walk(), Order::Pre);
+        while let Some(node) = iter.next() {
+            if node.kind() != "identifier"
+                || super::node_text(&parsed_ref.code, &node) != "show_ackermann_plate"
+            {
+                continue;
+            }
+
+            if node.parent().is_some_and(|assignment| {
+                assignment.kind() == "assignment"
+                    && assignment
+                        .child_by_field_name("value")
+                        .is_some_and(|value| {
+                            let value_range = value.byte_range();
+                            let node_range = node.byte_range();
+                            value_range.start <= node_range.start
+                                && node_range.end <= value_range.end
+                        })
+                    && assignment
+                        .parent()
+                        .is_some_and(|parameter| parameter.kind() == "parameter")
+            }) {
+                rhs_node = Some(node);
+            }
+
+            if let Some(assignment) = node.parent() {
+                if assignment.kind() == "assignment"
+                    && assignment
+                        .child_by_field_name("name")
+                        .is_some_and(|name_node| name_node == node)
+                {
+                    if let Some(decl) = assignment.parent() {
+                        if decl.kind() == "var_declaration" {
+                            outer_var_range = Some(assignment.lsp_range());
+                        }
+                    }
+                }
+            }
+        }
+
+        let rhs_node = rhs_node.expect("rhs identifier in parameter default");
+        let outer_var_range = outer_var_range.expect("outer variable declaration");
+        let results = server.find_identities(
+            &parsed_ref,
+            &|name| name == "show_ackermann_plate",
+            &rhs_node,
+            false,
+        );
+
+        let first = results.first().expect("definition result");
+        let first = first.borrow();
+        assert_eq!(first.url.as_ref(), Some(&file_url));
+        assert_eq!(first.range, outer_var_range);
+    }
+
+    #[test]
+    fn later_parameter_default_can_resolve_to_earlier_parameter() {
+        let tmp = tempdir().unwrap();
+        let file_path = tmp.path().join("main.scad");
+        let source = "module m(a=1, b=a) {}\n";
+        fs::write(&file_path, source).unwrap();
+
+        let (server_conn, _client_conn) = Connection::memory();
+        let args = Cli::parse_from(["openscad-lsp"]);
+        let mut server = Server::new(server_conn, args);
+
+        let file_url = Url::from_file_path(&file_path).unwrap();
+        let parsed = server.get_code(&file_url).expect("load test file");
+        if let Ok(mut parsed_mut) = parsed.try_borrow_mut() {
+            parsed_mut.gen_top_level_items_if_needed();
+        }
+        let parsed_ref = parsed.borrow();
+
+        let mut rhs_a_node = None;
+        let mut param_a_range = None;
+
+        let mut iter = traverse(parsed_ref.tree.walk(), Order::Pre);
+        while let Some(node) = iter.next() {
+            if node.kind() != "identifier" || super::node_text(&parsed_ref.code, &node) != "a" {
+                continue;
+            }
+
+            if node.parent().is_some_and(|assignment| {
+                assignment.kind() == "assignment"
+                    && assignment
+                        .child_by_field_name("value")
+                        .is_some_and(|value| {
+                            let value_range = value.byte_range();
+                            let node_range = node.byte_range();
+                            value_range.start <= node_range.start
+                                && node_range.end <= value_range.end
+                        })
+                    && assignment
+                        .child_by_field_name("name")
+                        .is_some_and(|name_node| {
+                            super::node_text(&parsed_ref.code, &name_node) == "b"
+                        })
+            }) {
+                rhs_a_node = Some(node);
+            }
+
+            if node.parent().is_some_and(|assignment| {
+                assignment.kind() == "assignment"
+                    && assignment
+                        .child_by_field_name("name")
+                        .is_some_and(|name_node| name_node == node)
+                    && assignment
+                        .parent()
+                        .is_some_and(|parameter| parameter.kind() == "parameter")
+            }) {
+                param_a_range = Some(node.lsp_range());
+            }
+        }
+
+        let rhs_a_node = rhs_a_node.expect("rhs a in second default parameter");
+        let param_a_range = param_a_range.expect("first parameter declaration");
+        let results = server.find_identities(&parsed_ref, &|name| name == "a", &rhs_a_node, false);
+
+        let first = results.first().expect("definition result");
+        let first = first.borrow();
+        assert_eq!(first.url.as_ref(), Some(&file_url));
+        assert_eq!(first.range, param_a_range);
     }
 }
