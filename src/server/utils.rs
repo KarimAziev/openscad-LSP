@@ -30,30 +30,6 @@ pub(crate) fn find_offset(text: &str, pos: Position) -> Option<usize> {
     Some(offset)
 }
 
-// Find the closest parent scope to the given node.
-pub(crate) fn find_node_scope(node: Node) -> Option<Node> {
-    let mut parent_scope = node;
-    while let Some(parent_node) = parent_scope.parent() {
-        parent_scope = parent_node;
-        if matches!(
-            parent_node.kind(),
-            "source_file" | "module_item" | "union_block"
-        ) {
-            // If this is a module_declaration, the module will detect itself as
-            // its scope. So we need to check for that and get its scope's scope.
-            return if node
-                .parent()
-                .is_some_and(|parent| parent.kind() == "module_item")
-            {
-                find_node_scope(parent_scope)
-            } else {
-                Some(parent_node)
-            };
-        }
-    }
-    None
-}
-
 pub(crate) const fn to_position(p: Point) -> Position {
     Position {
         line: p.row as u32,
@@ -143,6 +119,8 @@ impl NodeExt for Node<'_> {
 
 pub(crate) trait KindExt {
     fn is_include_statement(&self) -> bool;
+    fn is_use_statement(&self) -> bool;
+    fn is_dependency_statement(&self) -> bool;
     fn is_comment(&self) -> bool;
     #[allow(unused)]
     fn is_callable(&self) -> bool;
@@ -151,7 +129,15 @@ pub(crate) trait KindExt {
 
 impl KindExt for str {
     fn is_include_statement(&self) -> bool {
-        self == "include_statement" || self == "use_statement"
+        self == "include_statement"
+    }
+
+    fn is_use_statement(&self) -> bool {
+        self == "use_statement"
+    }
+
+    fn is_dependency_statement(&self) -> bool {
+        self.is_include_statement() || self.is_use_statement()
     }
 
     fn is_comment(&self) -> bool {

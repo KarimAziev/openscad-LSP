@@ -28,7 +28,10 @@ fn clean_doc_text(doc: &str, _builtin: bool) -> String {
             let mut line = line.trim_start();
 
             if line.starts_with("/*") {
-                line = line.trim_start_matches('/').trim_start_matches('*').trim_start();
+                line = line
+                    .trim_start_matches('/')
+                    .trim_start_matches('*')
+                    .trim_start();
             } else if line.starts_with("//") {
                 line = line.trim_start_matches('/').trim_start();
             }
@@ -64,6 +67,7 @@ pub(crate) struct ParsedCode {
     pub url: Url,
     pub root_items: Option<Vec<Rc<RefCell<Item>>>>,
     pub includes: Option<Vec<Url>>,
+    pub uses: Option<Vec<Url>>,
     pub is_builtin: bool,
     pub external_builtin: bool,
     pub changed: bool,
@@ -84,6 +88,7 @@ impl ParsedCode {
             url,
             root_items: None,
             includes: None,
+            uses: None,
             is_builtin: false,
             external_builtin: false,
             libs,
@@ -151,6 +156,7 @@ impl ParsedCode {
         let mut cursor: TreeCursor = self.tree.walk();
         let mut ret: Vec<Item> = vec![];
         let mut inc = vec![];
+        let mut uses = vec![];
 
         let mut doc: Option<String> = None;
         let mut doc_node: Option<Node> = None;
@@ -166,9 +172,9 @@ impl ParsedCode {
                     let doc_str = node_text(&self.code, node);
                     let newdoc = self.extract_doc(doc_str, self.is_builtin);
 
-                    if last.doc.is_some() {
-                        last.doc.as_mut().unwrap().push_str("  \n");
-                        last.doc.as_mut().unwrap().push_str(&newdoc);
+                    if let Some(doc) = &mut last.doc {
+                        doc.push_str("  \n");
+                        doc.push_str(&newdoc);
                     } else {
                         let mut doc = "".to_owned();
                         doc.push_str("  \n");
@@ -206,9 +212,13 @@ impl ParsedCode {
                     last_code_line = item.range.start.line as usize;
                     // log_to_console!("name: {} kind: {}", item.name, kind);
                     ret.push(item);
-                } else if node.kind().is_include_statement() {
+                } else if node.kind().is_dependency_statement() {
                     self.get_include_url(node).map(|url| {
-                        inc.push(url);
+                        if node.kind().is_include_statement() {
+                            inc.push(url);
+                        } else if node.kind().is_use_statement() {
+                            uses.push(url);
+                        }
                     });
                 }
 
@@ -234,6 +244,7 @@ impl ParsedCode {
 
         self.root_items = Some(items);
         self.includes = Some(inc);
+        self.uses = Some(uses);
     }
 
     pub(crate) fn get_include_url(&self, incstat_node: &Node) -> Option<Url> {
@@ -337,8 +348,7 @@ mod tests {
 
     #[test]
     fn preserves_newlines_in_indented_block_comments() {
-        let raw =
-            "/**\n  header line\n  \n  description line\n  - bullet one\n  - bullet two\n*/";
+        let raw = "/**\n  header line\n  \n  description line\n  - bullet one\n  - bullet two\n*/";
         let expected = "header line\n\ndescription line\n- bullet one\n- bullet two";
         assert_eq!(clean_doc_text(raw, false), expected);
     }

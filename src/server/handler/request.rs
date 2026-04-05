@@ -1,9 +1,6 @@
-use ignore::{WalkBuilder, types::Types, types::TypesBuilder};
 use std::{
     cell::{Ref, RefCell},
-    collections::{HashMap, HashSet},
-    fs,
-    path::{Path, PathBuf},
+    collections::HashMap,
     rc::Rc,
 };
 
@@ -12,19 +9,18 @@ use lsp_types::{
     CompletionItem, CompletionItemKind, CompletionList, CompletionParams, CompletionResponse,
     DocumentFormattingParams, DocumentSymbolParams, DocumentSymbolResponse, Documentation,
     GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams,
-    InsertTextFormat, InsertTextMode, Location, MarkupContent, Range, RenameParams,
+    InsertTextFormat, InsertTextMode, Location, MarkupContent, Position, Range, RenameParams,
     SymbolInformation, TextDocumentPositionParams, TextEdit, Url, WorkspaceEdit,
 };
-
-use tree_sitter::{Node, Point};
-use tree_sitter_traversal2::{Order, traverse};
 
 use crate::{
     response_item::{Item, ItemKind},
     server::{Server, parse_code::ParsedCode},
     topiary,
     utils::*,
+    workspace_index::{ResolvedSymbol, SymbolKey},
 };
+use tree_sitter::{Node, Point};
 
 fn get_node_at_point<'a>(parsed_code: &'a Ref<'_, ParsedCode>, point: Point) -> Node<'a> {
     let mut cursor = parsed_code.tree.root_node().walk();
@@ -32,48 +28,108 @@ fn get_node_at_point<'a>(parsed_code: &'a Ref<'_, ParsedCode>, point: Point) -> 
     cursor.node()
 }
 
+enum RenameLookup {
+    NonIdentifier,
+    Unresolved,
+    Builtin,
+    Workspace { range: Range, symbol: SymbolKey },
+}
+
 // Request handlers.
 impl Server {
+    fn lookup_rename_symbol(&mut self, uri: &Url, position: Position) -> Option<RenameLookup> {
+        let file = self.get_code(uri)?;
+        if let Ok(mut file_mut) = file.try_borrow_mut() {
+            file_mut.gen_top_level_items_if_needed();
+        }
+
+        let (range, fallback_symbol) = {
+            let bfile = file.borrow();
+            let node = get_node_at_point(&bfile, to_point(position));
+            if node.kind() != "identifier" {
+                return Some(RenameLookup::NonIdentifier);
+            }
+
+            let range = Range {
+                start: to_position(node.start_position()),
+                end: to_position(node.end_position()),
+            };
+            let name = node_text(&bfile.code, &node).to_owned();
+            let resolved = self.find_identities(
+                &bfile,
+                &|item_name| item_name == name.as_str(),
+                &node,
+                false,
+            );
+            let fallback_symbol = resolved
+                .first()
+                .and_then(|item| Self::resolved_symbol_from_item(&item.borrow()));
+
+            (range, fallback_symbol)
+        };
+
+        self.ensure_workspace_index();
+
+        let mut symbol = self.workspace_index.symbol_at(uri, &range);
+        if symbol.is_none() {
+            self.refresh_workspace_index_for_url(uri);
+            symbol = self.workspace_index.symbol_at(uri, &range);
+        }
+
+        Some(match symbol.or(fallback_symbol) {
+            Some(ResolvedSymbol::Workspace(symbol)) => RenameLookup::Workspace { range, symbol },
+            Some(ResolvedSymbol::Builtin { .. }) => RenameLookup::Builtin,
+            None => RenameLookup::Unresolved,
+        })
+    }
+
+    fn build_rename_workspace_edit(
+        &self,
+        symbol: &SymbolKey,
+        new_name: &str,
+    ) -> Option<WorkspaceEdit> {
+        let mut changes: HashMap<Url, Vec<TextEdit>> = HashMap::new();
+        for occurrence in self.workspace_index.references_for(symbol) {
+            changes.entry(occurrence.url).or_default().push(TextEdit {
+                range: occurrence.range,
+                new_text: new_name.to_owned(),
+            });
+        }
+
+        if changes.is_empty() {
+            return None;
+        }
+
+        for edits in changes.values_mut() {
+            edits.sort_by_key(|edit| {
+                (
+                    edit.range.start.line,
+                    edit.range.start.character,
+                    edit.range.end.line,
+                    edit.range.end.character,
+                )
+            });
+        }
+
+        Some(WorkspaceEdit {
+            changes: Some(changes),
+            ..Default::default()
+        })
+    }
+
     pub(crate) fn handle_prepare_rename(
         &mut self,
         id: RequestId,
         params: TextDocumentPositionParams,
     ) {
         let uri = params.text_document.uri;
-
-        let file = match self.get_code(&uri) {
-            Some(code) => code,
-            _ => return,
-        };
-        file.borrow_mut().gen_top_level_items_if_needed();
-        let bfile = file.borrow();
-
-        let node = get_node_at_point(&bfile, to_point(params.position));
-        if node.kind() != "identifier" {
-            self.respond(Response {
+        let response = match self.lookup_rename_symbol(&uri, params.position) {
+            Some(RenameLookup::Workspace { range, .. }) => Response {
                 id,
-                result: None,
+                result: Some(serde_json::to_value(range).unwrap()),
                 error: None,
-            });
-            return;
-        }
-        let ident_name = node_text(&bfile.code, &node);
-        let identifier_definition =
-            self.find_identities(&bfile, &|name| name == ident_name, &node, false);
-
-        let definition = if let Some(def) = identifier_definition.first() {
-            def
-        } else {
-            self.respond(Response {
-                id,
-                result: None,
-                error: None,
-            });
-            return;
-        };
-
-        if definition.borrow().url.is_none() {
-            self.respond(Response {
+            },
+            Some(RenameLookup::Builtin) => Response {
                 id,
                 result: None,
                 error: Some(ResponseError {
@@ -81,292 +137,77 @@ impl Server {
                     message: "Cannot rename builtin".to_string(),
                     data: None,
                 }),
-            });
-            return;
-        }
-
-        self.respond(Response {
-            id,
-            result: Some(
-                serde_json::to_value(Range {
-                    start: to_position(node.start_position()),
-                    end: to_position(node.end_position()),
-                })
-                .unwrap(),
-            ),
-            error: None,
-        })
+            },
+            Some(RenameLookup::NonIdentifier | RenameLookup::Unresolved) => Response {
+                id,
+                result: None,
+                error: None,
+            },
+            None => return,
+        };
+        self.respond(response)
     }
+
     pub(crate) fn handle_rename(&mut self, id: RequestId, params: RenameParams) {
         let uri = params.text_document_position.text_document.uri;
-        let ident_new_name = params.new_name;
-
-        let file = match self.get_code(&uri) {
-            Some(code) => code,
-            _ => return,
-        };
-        if let Ok(mut file_mut) = file.try_borrow_mut() {
-            file_mut.gen_top_level_items_if_needed();
-        }
-
-        let (ident_initial_name, identifier_definition) = {
-            let bfile = file.borrow();
-            let node = get_node_at_point(&bfile, to_point(params.text_document_position.position));
-            if node.kind() != "identifier" {
+        let result = match self.lookup_rename_symbol(&uri, params.text_document_position.position) {
+            Some(RenameLookup::Workspace { symbol, .. }) => {
+                let Some(edit) = self.build_rename_workspace_edit(&symbol, &params.new_name) else {
+                    self.respond(Response {
+                        id,
+                        result: None,
+                        error: Some(ResponseError {
+                            code: 0,
+                            message: "No renamable references found for this symbol".to_string(),
+                            data: None,
+                        }),
+                    });
+                    return;
+                };
+                serde_json::to_value(edit).unwrap()
+            }
+            Some(RenameLookup::Builtin) => {
                 self.respond(Response {
                     id,
                     result: None,
                     error: Some(ResponseError {
-                        code: -32600, // Invalid Request error
+                        code: 0,
+                        message: "Cannot rename builtin".to_string(),
+                        data: None,
+                    }),
+                });
+                return;
+            }
+            Some(RenameLookup::Unresolved) => {
+                self.respond(Response {
+                    id,
+                    result: None,
+                    error: Some(ResponseError {
+                        code: 0,
+                        message: "No definition found for this identifier".to_string(),
+                        data: None,
+                    }),
+                });
+                return;
+            }
+            Some(RenameLookup::NonIdentifier) => {
+                self.respond(Response {
+                    id,
+                    result: None,
+                    error: Some(ResponseError {
+                        code: -32600,
                         message: "No identifier at given position".to_string(),
                         data: None,
                     }),
                 });
                 return;
             }
-            let ident_initial_name = node_text(&bfile.code, &node).to_string();
-            let identifier_definition = self.find_identities(
-                &bfile,
-                &|name| name == ident_initial_name.as_str(),
-                &node,
-                false,
-            );
-            (ident_initial_name, identifier_definition)
-        };
-
-        let definition = if let Some(def) = identifier_definition.first() {
-            def
-        } else {
-            self.respond(Response {
-                id,
-                result: None,
-                error: Some(ResponseError {
-                    code: 0,
-                    message: "No definition found for this identifier".to_string(),
-                    data: None,
-                }),
-            });
-            return;
-        };
-
-        let (definition_url_opt, definition_range, is_global_symbol) = {
-            let def = definition.borrow();
-            let is_global_symbol = match (&def.kind, def.is_top_level) {
-                (ItemKind::Function { .. }, _) | (ItemKind::Module { .. }, _) => true,
-                (ItemKind::Variable, true) => true,
-                _ => false,
-            };
-            (def.url.clone(), def.range.clone(), is_global_symbol)
-        };
-
-        let definition_url = if let Some(url) = definition_url_opt {
-            url
-        } else {
-            self.respond(Response {
-                id,
-                result: None,
-                error: Some(ResponseError {
-                    code: 0,
-                    message: "Cannot rename builtin".to_string(),
-                    data: None,
-                }),
-            });
-            return;
-        };
-
-        let def_code = match self.get_code(&definition_url) {
-            Some(code) => code,
-            _ => {
-                self.respond(Response {
-                    id,
-                    result: None,
-                    error: Some(ResponseError {
-                        code: 0,
-                        message: "Definition file is not available".to_string(),
-                        data: None,
-                    }),
-                });
-                return;
-            }
-        };
-        if let Ok(mut code_mut) = def_code.try_borrow_mut() {
-            code_mut.gen_top_level_items_if_needed();
-        }
-
-        if !is_global_symbol {
-            let changes = {
-                let def_file = def_code.borrow();
-                let definition_node =
-                    get_node_at_point(&def_file, to_point(definition_range.start));
-                // unwrap here is fine because an identifier node should always have a parent scope
-                let parent_scope = find_node_scope(definition_node).unwrap();
-                let ident_initial_node = definition_node;
-
-                let mut node_iter = traverse(parent_scope.walk(), Order::Post);
-                let mut edits = vec![];
-                while let Some(node) = node_iter.next() {
-                    let is_identifier_instance = node.kind() != "identifier"
-                        || node_text(&def_file.code, &node) != ident_initial_name.as_str();
-                    if is_identifier_instance {
-                        continue;
-                    }
-
-                    let is_assignment = node
-                        .parent()
-                        .is_some_and(|node| node.kind() == "assignment");
-                    let is_assignment_in_subscope = is_assignment && node != ident_initial_node;
-                    if is_assignment_in_subscope {
-                        // Unwrap is ok because an identifier node would always have a parent scope.
-                        let scope = find_node_scope(node).unwrap();
-                        // Consume iterator until it reaches the parent scope
-                        while node_iter.next().is_some_and(|next| scope != next) {}
-                        continue;
-                    }
-
-                    edits.push(TextEdit {
-                        range: Range {
-                            start: to_position(node.start_position()),
-                            end: to_position(node.end_position()),
-                        },
-                        new_text: ident_new_name.clone(),
-                    });
-                }
-                edits
-            };
-
-            if changes.is_empty() {
-                self.respond(Response {
-                    id,
-                    result: None,
-                    error: Some(ResponseError {
-                        code: 0,
-                        message: "No renamable references found for this symbol".to_string(),
-                        data: None,
-                    }),
-                });
-                return;
-            }
-
-            let mut changes_map = HashMap::new();
-            changes_map.insert(definition_url, changes);
-
-            let result = WorkspaceEdit {
-                changes: Some(changes_map),
-                ..Default::default()
-            };
-
-            self.respond(Response {
-                id,
-                result: Some(serde_json::to_value(result).unwrap()),
-                error: None,
-            });
-            return;
-        }
-
-        let base_seeds = vec![uri.clone(), definition_url.clone()];
-        let mut related_urls = self.collect_related_urls(&base_seeds);
-        related_urls.insert(definition_url.clone());
-        related_urls.insert(uri.clone());
-        let identifier_urls = self.collect_identifier_urls(&ident_initial_name, &base_seeds);
-        related_urls.extend(identifier_urls);
-        let related_urls: Vec<Url> = related_urls.into_iter().collect();
-
-        let mut changes: HashMap<Url, Vec<TextEdit>> = HashMap::new();
-        let reference_cache = RefCell::new(HashMap::<Url, Vec<Rc<RefCell<Item>>>>::new());
-
-        for url in related_urls {
-            let code = match self.get_code(&url) {
-                Some(code) => code,
-                None => continue,
-            };
-            if let Ok(mut code_mut) = code.try_borrow_mut() {
-                code_mut.gen_top_level_items_if_needed();
-            }
-            let code_ref = code.borrow();
-            if !code_ref.code.contains(ident_initial_name.as_str()) {
-                continue;
-            }
-            let mut edits = vec![];
-            let ident_len = ident_initial_name.len();
-            let ident_bytes = ident_initial_name.as_bytes();
-            let mut idx = 0;
-            let code_str = &code_ref.code;
-            let code_bytes = code_str.as_bytes();
-
-            while idx + ident_len <= code_bytes.len() {
-                if &code_bytes[idx..idx + ident_len] != ident_bytes {
-                    idx += 1;
-                    continue;
-                }
-                let abs_idx = idx;
-                let end_idx = abs_idx + ident_len;
-                let node_opt = code_ref
-                    .tree
-                    .root_node()
-                    .descendant_for_byte_range(abs_idx, end_idx);
-                let Some(node) = node_opt else {
-                    idx += 1;
-                    continue;
-                };
-                if node.kind() != "identifier" {
-                    idx += 1;
-                    continue;
-                }
-                if node_text(code_str, &node) != ident_initial_name.as_str() {
-                    idx += 1;
-                    continue;
-                }
-
-                let resolved = self.find_identities_with_cache(
-                    &code_ref,
-                    &|name| name == ident_initial_name.as_str(),
-                    &node,
-                    false,
-                    &reference_cache,
-                );
-                if let Some(item) = resolved.first() {
-                    let item_ref = item.borrow();
-                    if item_ref.url.as_ref() == Some(&definition_url)
-                        && item_ref.range == definition_range
-                    {
-                        edits.push(TextEdit {
-                            range: Range {
-                                start: to_position(node.start_position()),
-                                end: to_position(node.end_position()),
-                            },
-                            new_text: ident_new_name.clone(),
-                        });
-                    }
-                }
-                idx = abs_idx + ident_len;
-            }
-
-            if !edits.is_empty() {
-                changes.insert(url, edits);
-            }
-        }
-
-        if changes.is_empty() {
-            self.respond(Response {
-                id,
-                result: None,
-                error: Some(ResponseError {
-                    code: 0,
-                    message: "No renamable references found for this symbol".to_string(),
-                    data: None,
-                }),
-            });
-            return;
-        }
-
-        let result = WorkspaceEdit {
-            changes: Some(changes),
-            ..Default::default()
+            None => return,
         };
 
         self.respond(Response {
             id,
-            result: Some(serde_json::to_value(result).unwrap()),
+            result: Some(result),
             error: None,
         });
     }
@@ -457,33 +298,15 @@ impl Server {
                     .collect::<Vec<Location>>();
                 Some(locs)
             }
-            "include_path" => {
-                let mut res = None;
-                if let Some(incs) = &(file.borrow().includes) {
-                    let include_path = name
-                        .trim_start_matches(&['<', '\n'][..])
-                        .trim_end_matches(&['>', '\n'][..]);
-
-                    let mut inciter = incs.iter();
-                    let loc = loop {
-                        if let Some(url) = inciter.next() {
-                            if url.path().ends_with(include_path) {
-                                break Some(Location {
-                                    uri: url.clone(),
-                                    range: Range::default(),
-                                });
-                            }
-                        } else {
-                            break None;
-                        }
-                    };
-
-                    if let Some(v) = loc {
-                        res = Some(vec![v]);
-                    }
-                };
-                res
-            }
+            "include_path" => node
+                .parent()
+                .and_then(|parent| bfile.get_include_url(&parent))
+                .map(|url| {
+                    vec![Location {
+                        uri: url,
+                        range: Range::default(),
+                    }]
+                }),
             _ => None,
         };
 
@@ -516,7 +339,7 @@ impl Server {
             node = get_node_at_point(&bfile, point);
         }
 
-        let mut items = self.find_identities(&*bfile, &|_| true, &node, true);
+        let mut items = self.find_identities(&bfile, &|_| true, &node, true);
 
         let kind = node.kind();
         if let Some(parent) = &node.parent().and_then(|parent| parent.parent()) {
@@ -540,7 +363,7 @@ impl Server {
                     .map(|child| node_text(&bfile.code, &child))
                     .map(|name| {
                         let fun_items = self.find_identities(
-                            &*bfile,
+                            &bfile,
                             &|item_name| item_name == name,
                             &node,
                             false,
@@ -639,7 +462,7 @@ impl Server {
             let mut parent = node.parent();
             let mut include = None;
             while let Some(pnode) = parent {
-                if pnode.kind().is_include_statement() {
+                if pnode.kind().is_dependency_statement() {
                     include = pnode.child(1);
                     break;
                 }
@@ -801,165 +624,326 @@ impl Server {
             error: None,
         });
     }
+}
 
-    fn collect_identifier_urls(&mut self, ident: &str, seeds: &[Url]) -> HashSet<Url> {
-        if ident.is_empty() {
-            return HashSet::new();
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Cli;
+    use clap::Parser;
+    use lsp_server::Connection;
+    use lsp_types::{
+        DidChangeTextDocumentParams, DidOpenTextDocumentParams, TextDocumentContentChangeEvent,
+        TextDocumentItem, VersionedTextDocumentIdentifier,
+    };
+    use std::{fs, path::Path};
+    use tempfile::tempdir;
+    use tree_sitter_traversal2::{Order, traverse};
+
+    fn make_server(workspace_root: &Path) -> (Server, Connection) {
+        let (server_conn, client_conn) = Connection::memory();
+        let args = Cli::parse_from(["openscad-lsp"]);
+        let mut server = Server::new(server_conn, args);
+        server.workspace_roots = vec![workspace_root.to_path_buf()];
+        (server, client_conn)
+    }
+
+    fn nth_identifier_position(server: &mut Server, url: &Url, name: &str, nth: usize) -> Position {
+        let code = server.get_code(url).expect("load file");
+        if let Ok(mut code_mut) = code.try_borrow_mut() {
+            code_mut.gen_top_level_items_if_needed();
         }
+        let code_ref = code.borrow();
+        let cursor = code_ref.tree.walk();
+        let mut seen = 0;
 
-        if let Some(cached) = self.identifier_index.get(ident) {
-            return cached.clone();
-        }
-
-        let mut roots: HashSet<PathBuf> = HashSet::new();
-        for root in &self.workspace_roots {
-            if root.exists() {
-                roots.insert(root.clone());
+        for node in traverse(cursor, Order::Pre) {
+            if node.kind() != "identifier" || node_text(&code_ref.code, &node) != name {
+                continue;
             }
+
+            if seen == nth {
+                return to_position(node.start_position());
+            }
+            seen += 1;
         }
 
-        let push_parent = |url: &Url, targets: &mut HashSet<PathBuf>| {
-            if let Ok(path) = url.to_file_path() {
-                if let Some(parent) = path.parent() {
-                    targets.insert(parent.to_path_buf());
-                }
-            }
+        panic!("identifier {name} occurrence {nth} not found");
+    }
+
+    fn rename_changes(
+        server: &mut Server,
+        url: &Url,
+        position: Position,
+        new_name: &str,
+    ) -> HashMap<Url, Vec<TextEdit>> {
+        let symbol = match server.lookup_rename_symbol(url, position) {
+            Some(RenameLookup::Workspace { symbol, .. }) => symbol,
+            Some(_) => panic!("expected workspace symbol"),
+            None => panic!("lookup failed"),
         };
 
-        for seed in seeds {
-            push_parent(seed, &mut roots);
-        }
-
-        for url in self.codes.keys() {
-            push_parent(url, &mut roots);
-        }
-
-        let library_dirs: Vec<PathBuf> = self
-            .library_locations
-            .borrow()
-            .iter()
-            .filter_map(|url| url.to_file_path().ok())
-            .collect();
-        roots.extend(library_dirs);
-
-        let types = Self::scad_types();
-        let mut visited_files: HashSet<PathBuf> = HashSet::new();
-        let mut found_urls: HashSet<Url> = HashSet::new();
-
-        for root in roots {
-            self.scan_directory_for_identifier(
-                &root,
-                ident,
-                &types,
-                &mut visited_files,
-                &mut found_urls,
-            );
-        }
-
-        for (url, code_rc) in self.codes.iter() {
-            if code_rc.borrow().code.contains(ident) {
-                found_urls.insert(url.clone());
-            }
-        }
-
-        self.identifier_index
-            .insert(ident.to_owned(), found_urls.clone());
-
-        found_urls
+        server
+            .build_rename_workspace_edit(&symbol, new_name)
+            .expect("workspace edit")
+            .changes
+            .expect("changes")
     }
 
-    fn scan_directory_for_identifier(
-        &mut self,
-        dir: &Path,
-        ident: &str,
-        types: &Types,
-        visited_files: &mut HashSet<PathBuf>,
-        found_urls: &mut HashSet<Url>,
-    ) {
-        if !dir.exists() {
-            return;
-        }
+    #[test]
+    fn rename_index_finds_references_across_files() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path();
 
-        let mut builder = WalkBuilder::new(dir);
-        builder.standard_filters(true);
-        builder.follow_links(false);
-        builder
-            .filter_entry(|entry| {
-                entry
-                    .file_type()
-                    .map(|ft| {
-                        if ft.is_dir() {
-                            !Self::should_skip_directory(entry.path())
-                        } else {
-                            true
-                        }
-                    })
-                    .unwrap_or(true)
-            })
-            .types(types.clone());
+        let lib_path = root.join("lib.scad");
+        let main_path = root.join("main.scad");
 
-        for result in builder.build() {
-            let entry = match result {
-                Ok(entry) => entry,
-                Err(_) => continue,
-            };
+        fs::write(
+            &lib_path,
+            "module foo() {}\nmodule use_foo() {\n  foo();\n}\n",
+        )
+        .unwrap();
+        fs::write(&main_path, "include <lib.scad>;\nfoo();\n").unwrap();
 
-            let file_type = match entry.file_type() {
-                Some(ft) => ft,
-                None => continue,
-            };
+        let (mut server, _client_conn) = make_server(root);
+        server.ensure_workspace_index();
 
-            if !file_type.is_file() {
-                continue;
-            }
+        let lib_url = Url::from_file_path(&lib_path).unwrap();
+        let main_url = Url::from_file_path(&main_path).unwrap();
+        let position = nth_identifier_position(&mut server, &lib_url, "foo", 0);
+        let changes = rename_changes(&mut server, &lib_url, position, "bar");
 
-            let path = entry.into_path();
-            if !visited_files.insert(path.clone()) {
-                continue;
-            }
-
-            let content = match fs::read_to_string(&path) {
-                Ok(text) => text,
-                Err(_) => continue,
-            };
-
-            if !content.contains(ident) {
-                continue;
-            }
-
-            if let Ok(url) = Url::from_file_path(&path) {
-                found_urls.insert(url.clone());
-                if let Some(code) = self.get_code(&url) {
-                    if let Ok(mut code_mut) = code.try_borrow_mut() {
-                        code_mut.gen_top_level_items_if_needed();
-                    }
-                }
-            }
-        }
+        assert_eq!(changes.get(&lib_url).map(Vec::len), Some(2));
+        assert_eq!(changes.get(&main_url).map(Vec::len), Some(1));
+        assert!(
+            changes
+                .values()
+                .flatten()
+                .all(|edit| edit.new_text == "bar"),
+            "every edit should use the new identifier",
+        );
     }
 
-    fn scad_types() -> Types {
-        let mut builder = TypesBuilder::new();
-        builder.add("scad", "*.scad").expect("valid glob");
-        builder.select("scad");
-        builder.build().expect("build types")
+    #[test]
+    fn rename_index_respects_shadowed_local_symbols() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path();
+
+        let file_path = root.join("local.scad");
+        fs::write(
+            &file_path,
+            "module demo() {\n  a = 1;\n  echo(a);\n  if (true) {\n    a = 2;\n    echo(a);\n  }\n  echo(a);\n}\n",
+        )
+        .unwrap();
+
+        let (mut server, _client_conn) = make_server(root);
+        server.ensure_workspace_index();
+
+        let file_url = Url::from_file_path(&file_path).unwrap();
+        let position = nth_identifier_position(&mut server, &file_url, "a", 0);
+        let changes = rename_changes(&mut server, &file_url, position, "outer");
+        let edits = changes.get(&file_url).expect("same-file edits");
+        let lines: Vec<u32> = edits.iter().map(|edit| edit.range.start.line).collect();
+
+        assert_eq!(edits.len(), 3);
+        assert_eq!(lines, vec![1, 2, 7]);
     }
 
-    fn should_skip_directory(path: &Path) -> bool {
-        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-            matches!(
-                name,
-                ".git"
-                    | ".hg"
-                    | ".svn"
-                    | "node_modules"
-                    | "target"
-                    | ".idea"
-                    | ".vscode"
-                    | "__pycache__"
-            )
-        } else {
-            false
-        }
+    #[test]
+    fn rename_index_updates_after_document_change() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path();
+
+        let lib_path = root.join("lib.scad");
+        let main_path = root.join("main.scad");
+
+        fs::write(&lib_path, "module foo() {}\n").unwrap();
+        fs::write(&main_path, "include <lib.scad>;\nfoo();\n").unwrap();
+
+        let (mut server, _client_conn) = make_server(root);
+        server.ensure_workspace_index();
+
+        let lib_url = Url::from_file_path(&lib_path).unwrap();
+        let main_url = Url::from_file_path(&main_path).unwrap();
+        let original_main = fs::read_to_string(&main_path).unwrap();
+
+        server.handle_did_open_text_document(DidOpenTextDocumentParams {
+            text_document: TextDocumentItem {
+                uri: main_url.clone(),
+                language_id: "openscad".to_string(),
+                version: 1,
+                text: original_main,
+            },
+        });
+
+        server.handle_did_change_text_document(DidChangeTextDocumentParams {
+            text_document: VersionedTextDocumentIdentifier {
+                uri: main_url.clone(),
+                version: 2,
+            },
+            content_changes: vec![TextDocumentContentChangeEvent {
+                range: None,
+                range_length: None,
+                text: "include <lib.scad>;\nfoo();\nfoo();\n".to_string(),
+            }],
+        });
+
+        let position = nth_identifier_position(&mut server, &lib_url, "foo", 0);
+        let changes = rename_changes(&mut server, &lib_url, position, "bar");
+
+        assert_eq!(changes.get(&main_url).map(Vec::len), Some(2));
+    }
+
+    #[test]
+    fn rename_index_parameter_declaration_updates_named_arguments() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path();
+
+        let lib_path = root.join("lib.scad");
+        let main_path = root.join("main.scad");
+
+        fs::write(&lib_path, "module demo(width=1) { echo(width); }\n").unwrap();
+        fs::write(&main_path, "include <lib.scad>;\ndemo(width=2);\n").unwrap();
+
+        let (mut server, _client_conn) = make_server(root);
+        server.ensure_workspace_index();
+
+        let lib_url = Url::from_file_path(&lib_path).unwrap();
+        let main_url = Url::from_file_path(&main_path).unwrap();
+        let position = nth_identifier_position(&mut server, &lib_url, "width", 0);
+        let changes = rename_changes(&mut server, &lib_url, position, "size");
+
+        assert_eq!(changes.get(&lib_url).map(Vec::len), Some(2));
+        assert_eq!(changes.get(&main_url).map(Vec::len), Some(1));
+        assert!(
+            changes
+                .values()
+                .flatten()
+                .all(|edit| edit.new_text == "size")
+        );
+    }
+
+    #[test]
+    fn rename_index_named_argument_resolves_back_to_parameter_declaration() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path();
+
+        let lib_path = root.join("lib.scad");
+        let main_path = root.join("main.scad");
+
+        fs::write(&lib_path, "module demo(width=1) { echo(width); }\n").unwrap();
+        fs::write(&main_path, "include <lib.scad>;\ndemo(width=2);\n").unwrap();
+
+        let (mut server, _client_conn) = make_server(root);
+        server.ensure_workspace_index();
+
+        let lib_url = Url::from_file_path(&lib_path).unwrap();
+        let main_url = Url::from_file_path(&main_path).unwrap();
+        let position = nth_identifier_position(&mut server, &main_url, "width", 0);
+        let changes = rename_changes(&mut server, &main_url, position, "size");
+
+        assert_eq!(changes.get(&lib_url).map(Vec::len), Some(2));
+        assert_eq!(changes.get(&main_url).map(Vec::len), Some(1));
+        assert!(
+            changes
+                .values()
+                .flatten()
+                .all(|edit| edit.new_text == "size")
+        );
+    }
+
+    #[test]
+    fn rename_index_use_does_not_export_globals() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path();
+
+        let lib_path = root.join("lib.scad");
+        let main_path = root.join("main.scad");
+
+        fs::write(&lib_path, "x = 1;\nmodule foo() { echo(x); }\n").unwrap();
+        fs::write(&main_path, "use <lib.scad>;\nfoo();\necho(x);\n").unwrap();
+
+        let (mut server, _client_conn) = make_server(root);
+        server.ensure_workspace_index();
+
+        let lib_url = Url::from_file_path(&lib_path).unwrap();
+        let main_url = Url::from_file_path(&main_path).unwrap();
+
+        let foo_position = nth_identifier_position(&mut server, &lib_url, "foo", 0);
+        let foo_changes = rename_changes(&mut server, &lib_url, foo_position, "bar");
+        assert_eq!(foo_changes.get(&main_url).map(Vec::len), Some(1));
+
+        let x_position = nth_identifier_position(&mut server, &lib_url, "x", 0);
+        let x_changes = rename_changes(&mut server, &lib_url, x_position, "y");
+        assert_eq!(x_changes.get(&lib_url).map(Vec::len), Some(2));
+        assert!(
+            !x_changes.contains_key(&main_url),
+            "globals from a used file should not be visible in the using file",
+        );
+    }
+
+    #[test]
+    fn rename_index_nested_use_is_not_reexported() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path();
+
+        let nested_path = root.join("nested.scad");
+        let mid_path = root.join("mid.scad");
+        let main_path = root.join("main.scad");
+
+        fs::write(&nested_path, "module inner() {}\n").unwrap();
+        fs::write(
+            &mid_path,
+            "use <nested.scad>;\nmodule outer() { inner(); }\n",
+        )
+        .unwrap();
+        fs::write(&main_path, "use <mid.scad>;\nouter();\ninner();\n").unwrap();
+
+        let (mut server, _client_conn) = make_server(root);
+        server.ensure_workspace_index();
+
+        let nested_url = Url::from_file_path(&nested_path).unwrap();
+        let mid_url = Url::from_file_path(&mid_path).unwrap();
+        let main_url = Url::from_file_path(&main_path).unwrap();
+
+        let outer_position = nth_identifier_position(&mut server, &mid_url, "outer", 0);
+        let outer_changes = rename_changes(&mut server, &mid_url, outer_position, "wrapper");
+        assert_eq!(outer_changes.get(&main_url).map(Vec::len), Some(1));
+
+        let inner_position = nth_identifier_position(&mut server, &nested_url, "inner", 0);
+        let inner_changes = rename_changes(&mut server, &nested_url, inner_position, "helper");
+        assert_eq!(inner_changes.get(&mid_url).map(Vec::len), Some(1));
+        assert!(
+            !inner_changes.contains_key(&main_url),
+            "nested use should not export its callables to the base file",
+        );
+    }
+
+    #[test]
+    fn rename_index_include_reexports_nested_use_callables() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path();
+
+        let nested_path = root.join("nested.scad");
+        let mid_path = root.join("mid.scad");
+        let main_path = root.join("main.scad");
+
+        fs::write(&nested_path, "module inner() {}\n").unwrap();
+        fs::write(
+            &mid_path,
+            "use <nested.scad>;\nmodule outer() { inner(); }\n",
+        )
+        .unwrap();
+        fs::write(&main_path, "include <mid.scad>;\nouter();\ninner();\n").unwrap();
+
+        let (mut server, _client_conn) = make_server(root);
+        server.ensure_workspace_index();
+
+        let nested_url = Url::from_file_path(&nested_path).unwrap();
+        let main_url = Url::from_file_path(&main_path).unwrap();
+
+        let inner_position = nth_identifier_position(&mut server, &nested_url, "inner", 0);
+        let inner_changes = rename_changes(&mut server, &nested_url, inner_position, "helper");
+        assert_eq!(inner_changes.get(&main_url).map(Vec::len), Some(1));
     }
 }

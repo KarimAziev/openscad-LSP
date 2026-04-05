@@ -3,8 +3,8 @@ use std::error::Error;
 use lsp_server::{ExtractError, Message, Response};
 use lsp_types::{
     notification::{
-        DidChangeConfiguration, DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument,
-        DidSaveTextDocument,
+        DidChangeConfiguration, DidChangeTextDocument, DidChangeWatchedFiles, DidCloseTextDocument,
+        DidOpenTextDocument, DidSaveTextDocument, Initialized,
     },
     request::{
         Completion, DocumentSymbolRequest, Formatting, GotoDefinition, HoverRequest,
@@ -77,7 +77,7 @@ impl Server {
                 err_to_console!("unknown request: {:?}", req);
             }
             Message::Response(resp) => {
-                err_to_console!("got response: {:?}", resp);
+                self.handle_client_response(resp);
             }
             Message::Notification(noti) => {
                 macro_rules! proc {
@@ -98,11 +98,13 @@ impl Server {
                     };
                 }
 
+                let noti = proc!(noti, Initialized, handle_initialized);
                 let noti = proc!(noti, DidOpenTextDocument, handle_did_open_text_document);
                 let noti = proc!(noti, DidChangeTextDocument, handle_did_change_text_document);
                 let noti = proc!(noti, DidSaveTextDocument, handle_did_save_text_document);
                 let noti = proc!(noti, DidCloseTextDocument, handle_did_close_text_document);
                 let noti = proc!(noti, DidChangeConfiguration, handle_did_change_config);
+                let noti = proc!(noti, DidChangeWatchedFiles, handle_did_change_watched_files);
 
                 err_to_console!("unknown notification: {:?}", noti);
             }

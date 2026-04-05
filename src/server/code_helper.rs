@@ -1,6 +1,6 @@
 use std::{
     cell::RefCell,
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashMap, HashSet},
     fs::read_to_string,
     io,
     rc::Rc,
@@ -15,6 +15,36 @@ use crate::{
     server::Server,
     utils::*,
 };
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum DependencyKind {
+    Include,
+    Use,
+}
+
+impl DependencyKind {
+    fn nested_visibility(self, nested: DependencyKind) -> Option<Self> {
+        match (self, nested) {
+            (Self::Include, Self::Include) => Some(Self::Include),
+            (Self::Include, Self::Use) => Some(Self::Use),
+            (Self::Use, Self::Include) => Some(Self::Use),
+            (Self::Use, Self::Use) => None,
+        }
+    }
+
+    fn exports_only_callables(self) -> bool {
+        matches!(self, Self::Use)
+    }
+}
+
+type CacheKey = (Url, DependencyKind);
+pub(crate) type IdentityCache = RefCell<HashMap<CacheKey, Vec<Rc<RefCell<Item>>>>>;
+
+#[derive(Clone)]
+struct DependencyEdge {
+    url: Url,
+    visibility: DependencyKind,
+}
 
 // Code-related helpers.
 impl Server {
@@ -46,7 +76,7 @@ impl Server {
         start_node: &Node,
         findall: bool,
     ) -> Vec<Rc<RefCell<Item>>> {
-        let mut visited = HashSet::new();
+        let mut visited = HashSet::<CacheKey>::new();
         let depth_limit = if self.args.depth == 0 {
             None
         } else {
@@ -60,6 +90,7 @@ impl Server {
             &mut visited,
             true,
             depth_limit,
+            DependencyKind::Include,
             None,
         )
     }
@@ -70,9 +101,9 @@ impl Server {
         comparator: &dyn Fn(&str) -> bool,
         start_node: &Node,
         findall: bool,
-        cache: &RefCell<HashMap<Url, Vec<Rc<RefCell<Item>>>>>,
+        cache: &IdentityCache,
     ) -> Vec<Rc<RefCell<Item>>> {
-        let mut visited = HashSet::new();
+        let mut visited = HashSet::<CacheKey>::new();
         let depth_limit = if self.args.depth == 0 {
             None
         } else {
@@ -86,6 +117,7 @@ impl Server {
             &mut visited,
             true,
             depth_limit,
+            DependencyKind::Include,
             Some(cache),
         )
     }
@@ -144,19 +176,103 @@ impl Server {
         None
     }
 
+    fn named_argument_parameter_context<'a>(
+        code: &ParsedCode,
+        start_node: &Node<'a>,
+    ) -> Option<(Node<'a>, String)> {
+        if start_node.kind() != "identifier" {
+            return None;
+        }
+
+        let assignment = start_node.parent()?;
+        if assignment.kind() != "assignment"
+            || !assignment
+                .child_by_field_name("name")
+                .is_some_and(|name_node| name_node == *start_node)
+        {
+            return None;
+        }
+
+        let arguments = assignment.parent()?;
+        if arguments.kind() != "arguments" {
+            return None;
+        }
+
+        let call = arguments.parent()?;
+        if call.kind() != "module_call" && call.kind() != "function_call" {
+            return None;
+        }
+
+        Some((call, node_text(&code.code, start_node).to_owned()))
+    }
+
+    fn named_argument_parameter_identities(
+        &mut self,
+        code: &ParsedCode,
+        comparator: &dyn Fn(&str) -> bool,
+        start_node: &Node,
+    ) -> Vec<Rc<RefCell<Item>>> {
+        let Some((call, arg_name)) = Self::named_argument_parameter_context(code, start_node)
+        else {
+            return vec![];
+        };
+
+        if !comparator(&arg_name) {
+            return vec![];
+        }
+
+        let Some(call_name_node) = call.child_by_field_name("name") else {
+            return vec![];
+        };
+        let call_name = node_text(&code.code, &call_name_node).to_owned();
+
+        let callable_items = self.find_identities(
+            code,
+            &|item_name| item_name == call_name.as_str(),
+            &call,
+            true,
+        );
+
+        for item in callable_items {
+            let (params, url, is_builtin) = {
+                let item_ref = item.borrow();
+                let params = match &item_ref.kind {
+                    ItemKind::Module { params } | ItemKind::Function { params } => params.clone(),
+                    _ => continue,
+                };
+                (params, item_ref.url.clone(), item_ref.is_builtin)
+            };
+
+            if let Some(param) = params.into_iter().find(|param| param.name == arg_name) {
+                return vec![Rc::new(RefCell::new(Item {
+                    name: param.name,
+                    kind: ItemKind::Variable,
+                    range: param.range,
+                    url,
+                    is_builtin,
+                    ..Default::default()
+                }))];
+            }
+        }
+
+        vec![]
+    }
+
     fn find_identities_inner(
         &mut self,
         code: &ParsedCode,
         comparator: &dyn Fn(&str) -> bool,
         start_node: &Node,
         findall: bool,
-        visited: &mut HashSet<Url>,
+        visited: &mut HashSet<CacheKey>,
         include_builtin: bool,
         remaining_depth: Option<usize>,
-        cache: Option<&RefCell<HashMap<Url, Vec<Rc<RefCell<Item>>>>>>,
+        visibility: DependencyKind,
+        cache: Option<&IdentityCache>,
     ) -> Vec<Rc<RefCell<Item>>> {
         let mut result: Vec<Rc<RefCell<Item>>> = vec![];
-        if !visited.insert(code.url.clone()) {
+        let code_key = (code.url.clone(), visibility);
+        if !visited.insert(code_key) {
             return result;
         }
 
@@ -166,12 +282,57 @@ impl Server {
             Self::parameter_default_context(code, start_node)
         };
 
-        let mut include_vec = vec![];
-        if include_builtin && !visited.contains(&self.builtin_url) {
-            include_vec.push(self.builtin_url.clone());
+        let named_argument_items =
+            self.named_argument_parameter_identities(code, comparator, start_node);
+        if !named_argument_items.is_empty() {
+            if !findall {
+                return named_argument_items;
+            }
+            result.extend(named_argument_items);
+        }
+
+        let mut dependency_vec = vec![];
+        if include_builtin
+            && !visited.contains(&(self.builtin_url.clone(), DependencyKind::Include))
+        {
+            dependency_vec.push(DependencyEdge {
+                url: self.builtin_url.clone(),
+                visibility: DependencyKind::Include,
+            });
         }
         if let Some(incs) = &code.includes {
-            include_vec.extend(incs.iter().filter(|inc| !visited.contains(*inc)).cloned());
+            dependency_vec.extend(
+                incs.iter()
+                    .filter_map(|inc| {
+                        visibility
+                            .nested_visibility(DependencyKind::Include)
+                            .filter(|nested_visibility| {
+                                !visited.contains(&(inc.clone(), *nested_visibility))
+                            })
+                            .map(|nested_visibility| DependencyEdge {
+                                url: inc.clone(),
+                                visibility: nested_visibility,
+                            })
+                    })
+                    .collect::<Vec<_>>(),
+            );
+        }
+        if let Some(uses) = &code.uses {
+            dependency_vec.extend(
+                uses.iter()
+                    .filter_map(|url| {
+                        visibility
+                            .nested_visibility(DependencyKind::Use)
+                            .filter(|nested_visibility| {
+                                !visited.contains(&(url.clone(), *nested_visibility))
+                            })
+                            .map(|nested_visibility| DependencyEdge {
+                                url: url.clone(),
+                                visibility: nested_visibility,
+                            })
+                    })
+                    .collect::<Vec<_>>(),
+            );
         }
 
         let mut node = *start_node;
@@ -181,9 +342,21 @@ impl Server {
             let is_top_level_node = parent.unwrap().parent().is_none();
 
             loop {
-                if node.kind().is_include_statement() {
-                    code.get_include_url(&node).map(|inc| {
-                        include_vec.push(inc);
+                if node.kind().is_dependency_statement() {
+                    let nested_kind = if node.kind().is_include_statement() {
+                        DependencyKind::Include
+                    } else {
+                        DependencyKind::Use
+                    };
+                    code.get_include_url(&node).map(|url| {
+                        visibility
+                            .nested_visibility(nested_kind)
+                            .map(|nested_visibility| {
+                                dependency_vec.push(DependencyEdge {
+                                    url,
+                                    visibility: nested_visibility,
+                                });
+                            });
                     });
                 }
 
@@ -240,7 +413,10 @@ impl Server {
                         _ => {}
                     };
 
-                    if !is_top_level_node && comparator(&item.name) {
+                    if visibility == DependencyKind::Include
+                        && !is_top_level_node
+                        && comparator(&item.name)
+                    {
                         item.url = Some(code.url.clone());
                         result.push(Rc::new(RefCell::new(item)));
                         if !findall {
@@ -263,7 +439,15 @@ impl Server {
 
         if let Some(items) = &code.root_items {
             for item in items {
-                if comparator(&item.borrow().name) {
+                let item_ref = item.borrow();
+                let is_callable = matches!(
+                    item_ref.kind,
+                    ItemKind::Function { .. } | ItemKind::Module { .. }
+                );
+                if visibility.exports_only_callables() && !is_callable {
+                    continue;
+                }
+                if comparator(&item_ref.name) {
                     result.push(item.clone());
                     if !findall {
                         return result;
@@ -272,18 +456,16 @@ impl Server {
             }
         }
 
-        for inc in include_vec {
-            if visited.contains(&inc) {
-                continue;
-            }
-            if let Some(0) = remaining_depth {
+        for edge in dependency_vec {
+            let cache_key = (edge.url.clone(), edge.visibility);
+            if visited.contains(&cache_key) || matches!(remaining_depth, Some(0)) {
                 continue;
             }
 
             if let Some(cache_cell) = cache {
                 if !findall {
-                    if let Some(cached) = cache_cell.borrow().get(&inc).cloned() {
-                        visited.insert(inc.clone());
+                    if let Some(cached) = cache_cell.borrow().get(&cache_key).cloned() {
+                        visited.insert(cache_key.clone());
                         result.extend(cached);
                         if !result.is_empty() && !findall {
                             return result;
@@ -293,7 +475,7 @@ impl Server {
                 }
             }
 
-            let inccode = match self.get_code(&inc) {
+            let inccode = match self.get_code(&edge.url) {
                 Some(code) => code,
                 _ => return result,
             };
@@ -309,11 +491,12 @@ impl Server {
                     visited,
                     false,
                     next_depth,
+                    edge.visibility,
                     cache,
                 );
                 if let Some(cache_cell) = cache {
                     if !findall {
-                        cache_cell.borrow_mut().insert(inc.clone(), nested.clone());
+                        cache_cell.borrow_mut().insert(cache_key, nested.clone());
                     }
                 }
                 result.extend(nested);
@@ -340,36 +523,6 @@ impl Server {
             }
             linked_hash_map::Entry::Vacant(_) => Ok(self.insert_code(url, text)),
         }
-    }
-
-    pub(crate) fn collect_related_urls(&mut self, seeds: &[Url]) -> HashSet<Url> {
-        let mut visited = HashSet::new();
-        let mut queue: VecDeque<Url> = VecDeque::new();
-
-        for seed in seeds {
-            queue.push_back(seed.clone());
-        }
-
-        while let Some(url) = queue.pop_front() {
-            if !visited.insert(url.clone()) {
-                continue;
-            }
-
-            if let Some(code_rc) = self.get_code(&url) {
-                if let Ok(mut code_mut) = code_rc.try_borrow_mut() {
-                    code_mut.gen_top_level_items_if_needed();
-                    if let Some(includes) = &code_mut.includes {
-                        for inc in includes {
-                            if !visited.contains(inc) {
-                                queue.push_back(inc.clone());
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        visited
     }
 }
 

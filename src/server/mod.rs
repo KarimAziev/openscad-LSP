@@ -4,20 +4,23 @@ pub(crate) mod code_helper;
 pub(crate) mod handler;
 pub(crate) mod parse_code;
 pub(crate) mod response_item;
+pub(crate) mod workspace_index;
 
 use directories::UserDirs;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::error::Error;
 use std::fs::read_to_string;
 use std::{cell::RefCell, env, path::PathBuf, rc::Rc};
 
 use linked_hash_map::LinkedHashMap;
-use lsp_server::Connection;
+use lsp_server::{Connection, Message, Request, RequestId, Response};
 use lsp_types::{
     HoverProviderCapability, InitializeParams, OneOf, RenameOptions, ServerCapabilities,
     TextDocumentSyncCapability, TextDocumentSyncKind, Url, WorkDoneProgressOptions,
 };
+use serde::Serialize;
 
+use self::workspace_index::WorkspaceIndex;
 use crate::Cli;
 use crate::parse_code::ParsedCode;
 
@@ -34,7 +37,13 @@ pub(crate) struct Server {
     builtin_url: Url,
     fmt_query: Option<String>,
     pub(crate) workspace_roots: Vec<PathBuf>,
-    pub(crate) identifier_index: HashMap<String, HashSet<Url>>,
+    pub(crate) open_documents: HashSet<Url>,
+    pub(crate) workspace_index: WorkspaceIndex,
+    did_change_watched_files_dynamic_registration: bool,
+    did_change_watched_files_relative_pattern_support: bool,
+    watched_files_registered: bool,
+    pending_watched_files_registration: Option<RequestId>,
+    next_request_id: i32,
 }
 
 pub(crate) enum LoopAction {
@@ -90,7 +99,13 @@ impl Server {
             builtin_url: url.to_owned(),
             fmt_query,
             workspace_roots: Vec::new(),
-            identifier_index: HashMap::new(),
+            open_documents: HashSet::new(),
+            workspace_index: WorkspaceIndex::default(),
+            did_change_watched_files_dynamic_registration: false,
+            did_change_watched_files_relative_pattern_support: false,
+            watched_files_registered: false,
+            pending_watched_files_registration: None,
+            next_request_id: 1,
         };
         let rc = instance.insert_code(url, code);
 
@@ -218,6 +233,8 @@ impl Server {
         let init_params = self.connection.initialize(caps)?;
         let init: InitializeParams = serde_json::from_value(init_params)?;
         self.workspace_roots = Self::extract_workspace_roots(&init);
+        self.configure_client_capabilities(&init);
+        self.ensure_workspace_index();
         while let Ok(msg) = self.connection.receiver.recv() {
             match self.handle_message(msg)? {
                 LoopAction::Continue => {}
@@ -260,5 +277,80 @@ impl Server {
         }
 
         roots
+    }
+
+    pub(crate) fn configure_client_capabilities(&mut self, params: &InitializeParams) {
+        let watched_files = params
+            .capabilities
+            .workspace
+            .as_ref()
+            .and_then(|workspace| workspace.did_change_watched_files);
+
+        self.did_change_watched_files_dynamic_registration = watched_files
+            .and_then(|capabilities| capabilities.dynamic_registration)
+            .unwrap_or(false);
+        self.did_change_watched_files_relative_pattern_support = watched_files
+            .and_then(|capabilities| capabilities.relative_pattern_support)
+            .unwrap_or(false);
+    }
+
+    pub(crate) fn supports_dynamic_watched_files_registration(&self) -> bool {
+        self.did_change_watched_files_dynamic_registration
+    }
+
+    pub(crate) fn supports_relative_watch_patterns(&self) -> bool {
+        self.did_change_watched_files_relative_pattern_support
+    }
+
+    pub(crate) fn watched_files_registered(&self) -> bool {
+        self.watched_files_registered
+    }
+
+    pub(crate) fn watched_files_registration_pending(&self) -> bool {
+        self.pending_watched_files_registration.is_some()
+    }
+
+    pub(crate) fn mark_watched_files_registration_pending(&mut self, request_id: RequestId) {
+        self.pending_watched_files_registration = Some(request_id);
+    }
+
+    pub(crate) fn send_request<R>(&mut self, params: R::Params) -> RequestId
+    where
+        R: lsp_types::request::Request,
+        R::Params: Serialize,
+    {
+        let request_id = RequestId::from(self.next_request_id);
+        self.next_request_id += 1;
+
+        self.connection
+            .sender
+            .send(Message::Request(Request::new(
+                request_id.clone(),
+                R::METHOD.to_owned(),
+                params,
+            )))
+            .unwrap();
+
+        request_id
+    }
+
+    pub(crate) fn handle_client_response(&mut self, response: Response) {
+        if self.pending_watched_files_registration.as_ref() == Some(&response.id) {
+            self.pending_watched_files_registration = None;
+
+            if let Some(error) = response.error {
+                self.watched_files_registered = false;
+                err_to_console!(
+                    "failed to register workspace file watchers: {} ({})",
+                    error.message,
+                    error.code
+                );
+            } else {
+                self.watched_files_registered = true;
+            }
+            return;
+        }
+
+        err_to_console!("got response: {:?}", response);
     }
 }

@@ -1,21 +1,24 @@
 # About
 
-Fork of [dzhu/openscad-language-server](https://github.com/dzhu/openscad-language-server), focused on improving OpenSCAD editing for larger projects and day-to-day IDE workflows.
+**Table of Contents**
+
+> - [About](#about)
+>   - [Features](#features)
+>   - [Install](#install)
+>   - [IDE plugins](#ide-plugins)
+>     - [Emacs](#emacs)
+>   - [Usage](#usage)
+
+This a fork of [openscad-language-server](https://github.com/dzhu/openscad-language-server), focused on improving OpenSCAD editing for larger projects and day-to-day IDE workflows.
 
 Main differences in this fork:
 
 - workspace-scale symbol/rename support with identifier indexing and caching
+- watched workspace `.scad` files keep the symbol index fresh even when documents are closed
 - configurable include traversal depth for symbol resolution (`--depth`, where `0` means unlimited)
 - improved completion behavior, including better deduplication and callable parameter suggestions
 - corrected `Go to Definition` behavior for parameter defaults like `p = p` (RHS resolves to outer scope)
 - refreshed builtin documentation and cleaner parser-based extraction of comment docs
-
-> - [About](#about)
->   - [Features](#features)
->   - [IDE plugins](#ide-plugins)
->   - [Install](#install)
->   - [Build](#build)
->   - [Usage](#usage)
 
 ## Features
 
@@ -30,21 +33,16 @@ Main differences in this fork:
 - formatter using Topiary
 - variable/module renaming (local scope and workspace/include-aware for global symbols)
 - indexed/cached identifier lookup for workspace-scale rename/reference resolution
+- watched workspace `.scad` file changes refresh the rename/reference index for closed files
 - hover and suggestion documentation from comments before function/module declarations
-
-## IDE plugins
-
-| IDE     | Plugin                                                                           | Note                           |
-| ------- | -------------------------------------------------------------------------------- | ------------------------------ |
-| Neovim  | [mason.nvim](https://github.com/williamboman/mason.nvim)                         | Only tested on Mac and Linux   |
-| Neovim  | [nvim-lspconfig](https://github.com/neovim/nvim-lspconfig)                       | Only tested on Mac and Linux   |
-| VS Code | [openscad-language-support](https://github.com/Leathong/openscad-support-vscode) | Only tested on Mac and Windows |
-| Emacs   | [lsp-bridge](https://github.com/manateelazycat/lsp-bridge)                       | Only tested on Mac and Linux   |
 
 ## Install
 
 openscad-LSP is written in [Rust](https://rust-lang.org), in order to use it, you need to
 install [Rust toolchain](https://www.rust-lang.org/learn/get-started).
+
+Since this fork is unpublished, install it locally from this repository and ensure the installed
+binary is available on your `PATH` so your editor can start `openscad-lsp`.
 
 ```sh
 make install-local
@@ -56,17 +54,77 @@ Equivalent direct command:
 cargo install --path . --locked --force
 ```
 
-## Build
+## IDE plugins
 
-```sh
-cd openscad-LSP
-cargo build --release
+| IDE     | Plugin                                                                                                               | Note                           |
+| ------- | -------------------------------------------------------------------------------------------------------------------- | ------------------------------ |
+| Neovim  | [mason.nvim](https://github.com/williamboman/mason.nvim)                                                             | Only tested on Mac and Linux   |
+| Neovim  | [nvim-lspconfig](https://github.com/neovim/nvim-lspconfig)                                                           | Only tested on Mac and Linux   |
+| VS Code | [openscad-language-support](https://github.com/Leathong/openscad-support-vscode)                                     | Only tested on Mac and Windows |
+| Emacs   | [lsp-mode](https://github.com/emacs-lsp/lsp-mode), eglot, [lsp-bridge](https://github.com/manateelazycat/lsp-bridge) | Only tested on Mac and Linux   |
+
+### Emacs
+
+For `scad-mode` with `lsp-mode`:
+
+```elisp
+;; https://github.com/emacs-lsp/lsp-mode
+(use-package lsp-mode
+  :hook ((scad-mode . lsp)))
 ```
 
-Cross-platform release archives via Makefile:
+For `scad-ts-mode` and `scad-mode` with `lsp-mode`:
 
-```sh
-make build
+```elisp
+;; https://github.com/emacs-lsp/lsp-mode
+(use-package lsp-mode
+  :hook ((scad-mode . lsp)
+         (scad-ts-mode . lsp))
+  :defines (make-lsp-client)
+  :config
+  (require 'lsp)
+  (require 'lsp-openscad)
+  (add-to-list 'lsp-language-id-configuration
+               '(scad-ts-mode . "openscad"))
+  (declare-function lsp-register-client "lsp-mode")
+  (declare-function make-lsp-client "lsp-mode")
+  (declare-function lsp-openscad-server-connection "lsp-openscad")
+  (declare-function lsp-get "lsp-protocol")
+  (declare-function lsp:set-server-capabilities-completion-provider?
+                    "lsp-protocol")
+  (declare-function lsp--set-configuration "lsp-protocol")
+  (declare-function lsp-configuration-section "lsp-protocol")
+  (lsp-register-client
+   (make-lsp-client
+    :new-connection (lsp-openscad-server-connection)
+    :major-modes '(scad-ts-mode scad-mode)
+    :priority -1
+    :initialized-fn (lambda (workspace)
+                      (let ((caps (lsp--workspace-server-capabilities
+                                   workspace)))
+                        (unless (lsp-get caps :completionProvider)
+                          (lsp:set-server-capabilities-completion-provider?
+                           caps t)))
+                      (with-lsp-workspace workspace
+                        (lsp--set-configuration
+                         (lsp-configuration-section
+                          "openscad"))))
+    :server-id 'openscad)))
+```
+
+For `eglot`:
+
+```elisp
+(use-package eglot
+  :hook (((scad-mode
+           scad-ts-mode)
+          .
+          eglot-ensure))
+  :config
+  (add-to-list 'eglot-server-programs
+               '(scad-ts-mode . ("openscad-lsp" "--stdio")))
+  (add-to-list 'eglot-server-programs
+               '(scad-mode . ("openscad-lsp" "--stdio"))))
 ```
 
 ## Usage
