@@ -19,3 +19,6 @@ linux: format
 
 debug: format
 	cargo build
+
+install-local:
+	cargo install --path . --locked --force
