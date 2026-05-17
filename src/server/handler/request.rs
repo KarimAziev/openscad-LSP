@@ -1,6 +1,6 @@
 use std::{
     cell::{Ref, RefCell},
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     rc::Rc,
 };
 
@@ -35,8 +35,251 @@ enum RenameLookup {
     Workspace { range: Range, symbol: SymbolKey },
 }
 
+struct ArgumentNameCompletionContext<'a> {
+    call: Node<'a>,
+    prefix: String,
+    positional_count: usize,
+    used_named_args: HashSet<String>,
+}
+
 // Request handlers.
 impl Server {
+    fn node_contains_byte(node: &Node, byte_offset: usize) -> bool {
+        node.start_byte() <= byte_offset && byte_offset <= node.end_byte()
+    }
+
+    fn argument_call_context<'a>(
+        node: Node<'a>,
+        byte_offset: usize,
+    ) -> Option<(Node<'a>, Node<'a>)> {
+        let mut current = Some(node);
+        while let Some(current_node) = current {
+            if current_node.kind() == "arguments" {
+                let call = current_node.parent()?;
+                if call.kind() == "module_call" || call.kind() == "function_call" {
+                    return Some((call, current_node));
+                }
+            }
+
+            if current_node.kind() == "module_call" || current_node.kind() == "function_call" {
+                if let Some(arguments) = current_node.child_by_field_name("arguments") {
+                    if Self::node_contains_byte(&arguments, byte_offset) {
+                        return Some((current_node, arguments));
+                    }
+                }
+            }
+
+            current = current_node.parent();
+        }
+
+        None
+    }
+
+    fn direct_argument_at<'a>(arguments: Node<'a>, byte_offset: usize) -> Option<Node<'a>> {
+        arguments
+            .named_children(&mut arguments.walk())
+            .find(|child| Self::node_contains_byte(child, byte_offset))
+    }
+
+    fn argument_assignment_ancestor<'a>(node: Node<'a>, arguments: Node<'a>) -> Option<Node<'a>> {
+        let mut current = Some(node);
+        while let Some(current_node) = current {
+            if current_node == arguments {
+                return None;
+            }
+
+            if current_node.kind() == "assignment"
+                && current_node
+                    .parent()
+                    .is_some_and(|parent| parent == arguments)
+            {
+                return Some(current_node);
+            }
+
+            current = current_node.parent();
+        }
+
+        None
+    }
+
+    fn is_argument_value_context(
+        code: &str,
+        node: Node,
+        arguments: Node,
+        byte_offset: usize,
+    ) -> bool {
+        if let Some(assignment) = Self::argument_assignment_ancestor(node, arguments) {
+            if let Some(value) = assignment.child_by_field_name("value") {
+                if byte_offset >= value.start_byte() {
+                    return true;
+                }
+            }
+
+            let Some(name) = assignment.child_by_field_name("name") else {
+                return false;
+            };
+
+            if byte_offset <= name.end_byte() {
+                return false;
+            }
+
+            let end = byte_offset.min(assignment.end_byte()).min(code.len());
+            return code
+                .get(name.end_byte()..end)
+                .is_some_and(|between_name_and_cursor| between_name_and_cursor.contains('='));
+        }
+
+        let start = code[..byte_offset.min(code.len())]
+            .rfind([',', '('])
+            .map_or(arguments.start_byte(), |index| index + 1)
+            .max(arguments.start_byte());
+        code.get(start..byte_offset.min(code.len()))
+            .is_some_and(|current_argument_text| current_argument_text.contains('='))
+    }
+
+    fn argument_name_prefix(code: &str, node: Node, arguments: Node, byte_offset: usize) -> String {
+        let Some(argument) = Self::direct_argument_at(arguments, byte_offset) else {
+            let start = code[..byte_offset.min(code.len())]
+                .rfind(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_' || ch == '$'))
+                .map_or(arguments.start_byte(), |index| index + 1)
+                .max(arguments.start_byte());
+            return code
+                .get(start..byte_offset.min(code.len()))
+                .unwrap_or_default()
+                .to_owned();
+        };
+
+        if argument.kind() == "identifier" && Self::node_contains_byte(&argument, byte_offset) {
+            let end = byte_offset.min(argument.end_byte()).min(code.len());
+            return code
+                .get(argument.start_byte()..end)
+                .unwrap_or_default()
+                .to_owned();
+        }
+
+        let mut current = Some(node);
+        while let Some(current_node) = current {
+            if current_node == arguments {
+                break;
+            }
+
+            if current_node.kind() == "identifier"
+                && Self::node_contains_byte(&current_node, byte_offset)
+                && Self::node_contains_byte(&argument, byte_offset)
+            {
+                let end = byte_offset.min(current_node.end_byte()).min(code.len());
+                return code
+                    .get(current_node.start_byte()..end)
+                    .unwrap_or_default()
+                    .to_owned();
+            }
+
+            current = current_node.parent();
+        }
+
+        String::new()
+    }
+
+    fn argument_name_completion_context<'a>(
+        code: &str,
+        node: Node<'a>,
+        byte_offset: usize,
+    ) -> Option<ArgumentNameCompletionContext<'a>> {
+        let (call, arguments) = Self::argument_call_context(node, byte_offset)?;
+
+        if Self::is_argument_value_context(code, node, arguments, byte_offset) {
+            return None;
+        }
+
+        if let Some(argument) = Self::direct_argument_at(arguments, byte_offset) {
+            if argument.kind() != "assignment"
+                && argument.kind() != "identifier"
+                && argument.start_byte() < byte_offset
+            {
+                return None;
+            }
+        }
+
+        let current_argument_start = Self::direct_argument_at(arguments, byte_offset)
+            .map_or(byte_offset, |argument| argument.start_byte());
+        let current_assignment = Self::argument_assignment_ancestor(node, arguments);
+        let mut positional_count = 0;
+        let mut used_named_args = HashSet::new();
+
+        for argument in arguments.named_children(&mut arguments.walk()) {
+            if current_assignment.is_some_and(|assignment| assignment == argument) {
+                continue;
+            }
+
+            if argument.kind() == "assignment" {
+                if let Some(name) = argument.child_by_field_name("name") {
+                    used_named_args.insert(node_text(code, &name).to_owned());
+                }
+            } else if argument.end_byte() <= current_argument_start {
+                positional_count += 1;
+            }
+        }
+
+        Some(ArgumentNameCompletionContext {
+            call,
+            prefix: Self::argument_name_prefix(code, node, arguments, byte_offset),
+            positional_count,
+            used_named_args,
+        })
+    }
+
+    fn argument_name_completion_items(
+        &mut self,
+        code: &ParsedCode,
+        context: &ArgumentNameCompletionContext<'_>,
+    ) -> Vec<Rc<RefCell<Item>>> {
+        let Some(call_name_node) = context.call.child_by_field_name("name") else {
+            return vec![];
+        };
+        let call_name = node_text(&code.code, &call_name_node).to_owned();
+        let callable_items = self.find_identities(
+            code,
+            &|item_name| item_name == call_name.as_str(),
+            &context.call,
+            true,
+        );
+
+        let mut items = vec![];
+        let mut seen = HashSet::new();
+        for item in callable_items {
+            let (params, url, is_builtin) = {
+                let item_ref = item.borrow();
+                let params = match &item_ref.kind {
+                    ItemKind::Module { params } | ItemKind::Function { params } => params.clone(),
+                    _ => continue,
+                };
+                (params, item_ref.url.clone(), item_ref.is_builtin)
+            };
+
+            for param in params
+                .into_iter()
+                .skip(context.positional_count)
+                .filter(|param| param.name.starts_with(&context.prefix))
+                .filter(|param| !context.used_named_args.contains(&param.name))
+            {
+                if !seen.insert(param.name.clone()) {
+                    continue;
+                }
+
+                items.push(Rc::new(RefCell::new(Item {
+                    name: param.name,
+                    kind: ItemKind::Variable,
+                    range: param.range,
+                    url: url.clone(),
+                    is_builtin,
+                    ..Default::default()
+                })));
+            }
+        }
+
+        items
+    }
+
     fn lookup_rename_symbol(&mut self, uri: &Url, position: Position) -> Option<RenameLookup> {
         let file = self.get_code(uri)?;
         if let Ok(mut file_mut) = file.try_borrow_mut() {
@@ -339,79 +582,16 @@ impl Server {
             node = get_node_at_point(&bfile, point);
         }
 
-        let mut items = self.find_identities(&bfile, &|_| true, &node, true);
-
-        let kind = node.kind();
-        if let Some(parent) = &node.parent().and_then(|parent| parent.parent()) {
-            let kind = parent.kind();
-            let mut node = None;
-            if kind == "arguments" {
-                if let Some(callable) = parent.parent() {
-                    let kind = callable.kind();
-                    if kind == "module_call" || kind == "function_call" {
-                        node = Some(callable);
-                    }
-                }
-            }
-
-            if kind == "module_call" || kind == "function_call" {
-                node = Some(*parent);
-            }
-
-            if let Some(node) = node {
-                node.child_by_field_name("name")
-                    .map(|child| node_text(&bfile.code, &child))
-                    .map(|name| {
-                        let fun_items = self.find_identities(
-                            &bfile,
-                            &|item_name| item_name == name,
-                            &node,
-                            false,
-                        );
-
-                        if !fun_items.is_empty() {
-                            let item = &fun_items[0];
-
-                            let param_items = match &item.borrow().kind {
-                                ItemKind::Module { params } => {
-                                    let mut result = vec![];
-                                    for p in params {
-                                        result.push(Rc::new(RefCell::new(Item {
-                                            name: p.name.clone(),
-                                            kind: ItemKind::Variable,
-                                            range: p.range,
-                                            url: Some(bfile.url.clone()),
-                                            ..Default::default()
-                                        })));
-                                    }
-                                    result
-                                }
-                                ItemKind::Function { params } => {
-                                    let mut result = vec![];
-                                    for p in params {
-                                        result.push(Rc::new(RefCell::new(Item {
-                                            name: p.name.clone(),
-                                            kind: ItemKind::Variable,
-                                            range: p.range,
-                                            url: Some(bfile.url.clone()),
-                                            ..Default::default()
-                                        })));
-                                    }
-                                    result
-                                }
-                                _ => {
-                                    vec![]
-                                }
-                            };
-
-                            items.extend(param_items);
-                        }
-                    });
-            }
-        }
+        let byte_offset = find_offset(&bfile.code, pos).unwrap_or(bfile.code.len());
+        let argument_name_context =
+            Self::argument_name_completion_context(&bfile.code, node, byte_offset);
+        let mut items = match &argument_name_context {
+            Some(context) => self.argument_name_completion_items(&bfile, context),
+            None => self.find_identities(&bfile, &|_| true, &node, true),
+        };
 
         let builtin_url = self.builtin_url.clone();
-        if !items.iter().any(|item| item.borrow().is_builtin) {
+        if argument_name_context.is_none() && !items.iter().any(|item| item.borrow().is_builtin) {
             if let Some(builtin_code) = self.get_code(&builtin_url) {
                 if let Ok(mut builtin_mut) = builtin_code.try_borrow_mut() {
                     builtin_mut.gen_top_level_items_if_needed();
@@ -455,6 +635,7 @@ impl Server {
         }
 
         let items = unique_items;
+        let kind = node.kind();
 
         let include_node = if kind == "include_path" {
             Some(node)
@@ -631,10 +812,11 @@ mod tests {
     use super::*;
     use crate::Cli;
     use clap::Parser;
-    use lsp_server::Connection;
+    use lsp_server::{Connection, Message};
     use lsp_types::{
-        DidChangeTextDocumentParams, DidOpenTextDocumentParams, TextDocumentContentChangeEvent,
-        TextDocumentItem, VersionedTextDocumentIdentifier,
+        DidChangeTextDocumentParams, DidOpenTextDocumentParams, PartialResultParams,
+        TextDocumentContentChangeEvent, TextDocumentIdentifier, TextDocumentItem,
+        VersionedTextDocumentIdentifier, WorkDoneProgressParams,
     };
     use std::{fs, path::Path};
     use tempfile::tempdir;
@@ -646,6 +828,62 @@ mod tests {
         let mut server = Server::new(server_conn, args);
         server.workspace_roots = vec![workspace_root.to_path_buf()];
         (server, client_conn)
+    }
+
+    fn source_and_position(source: &str) -> (String, Position) {
+        let marker_start = source.find('$').expect("cursor marker");
+        let marker_len = if source[marker_start..].starts_with("$0") {
+            2
+        } else {
+            1
+        };
+        let before_marker = &source[..marker_start];
+        let line = before_marker.bytes().filter(|byte| *byte == b'\n').count() as u32;
+        let character = before_marker
+            .rsplit_once('\n')
+            .map_or(before_marker, |(_, line)| line)
+            .chars()
+            .count() as u32;
+        let mut code = source.to_owned();
+        code.replace_range(marker_start..marker_start + marker_len, "");
+
+        (code, Position { line, character })
+    }
+
+    fn completion_labels_at_marker(source: &str) -> Vec<String> {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path();
+        let file_path = root.join("main.scad");
+        let (code, position) = source_and_position(source);
+        fs::write(&file_path, &code).unwrap();
+
+        let (mut server, client_conn) = make_server(root);
+        let uri = Url::from_file_path(&file_path).unwrap();
+        server.handle_completion(
+            RequestId::from(1),
+            CompletionParams {
+                text_document_position: TextDocumentPositionParams {
+                    text_document: TextDocumentIdentifier { uri },
+                    position,
+                },
+                work_done_progress_params: WorkDoneProgressParams::default(),
+                partial_result_params: PartialResultParams::default(),
+                context: None,
+            },
+        );
+
+        let message = client_conn.receiver.recv().expect("completion response");
+        let Message::Response(response) = message else {
+            panic!("expected response");
+        };
+        let result = response.result.expect("completion result");
+        let response: CompletionResponse = serde_json::from_value(result).unwrap();
+        let items = match response {
+            CompletionResponse::Array(items) => items,
+            CompletionResponse::List(list) => list.items,
+        };
+
+        items.into_iter().map(|item| item.label).collect()
     }
 
     fn nth_identifier_position(server: &mut Server, url: &Url, name: &str, nth: usize) -> Position {
@@ -688,6 +926,50 @@ mod tests {
             .expect("workspace edit")
             .changes
             .expect("changes")
+    }
+
+    #[test]
+    fn completion_in_empty_call_returns_callable_parameters() {
+        let labels = completion_labels_at_marker(
+            "module assembly(show_pill=true, show_barrel=true, my_param=4) {}\nassembly($);\n",
+        );
+
+        assert_eq!(labels, vec!["show_pill", "show_barrel", "my_param"]);
+    }
+
+    #[test]
+    fn completion_in_call_argument_name_filters_by_prefix() {
+        let labels = completion_labels_at_marker(
+            "module assembly(show_pill=true, show_barrel=true, my_param=4) {}\nassembly(s$);\n",
+        );
+
+        assert_eq!(labels, vec!["show_pill", "show_barrel"]);
+    }
+
+    #[test]
+    fn completion_in_argument_value_uses_lexical_items() {
+        let labels = completion_labels_at_marker(
+            "global_value = 1;\nmodule assembly(show_pill=true, show_barrel=true, my_param=4) {}\nassembly(show_barrel=$);\n",
+        );
+
+        assert!(labels.contains(&"global_value".to_owned()));
+        assert!(labels.contains(&"assembly".to_owned()));
+        assert!(!labels.contains(&"show_pill".to_owned()));
+        assert!(!labels.contains(&"show_barrel".to_owned()));
+    }
+
+    #[test]
+    fn completion_in_builtin_call_skips_positional_parameters() {
+        let labels = completion_labels_at_marker("cube([10, 20, 5], $);\n");
+
+        assert_eq!(labels, vec!["center"]);
+    }
+
+    #[test]
+    fn completion_in_parameterless_builtin_call_is_empty() {
+        let labels = completion_labels_at_marker("union($0) {}\n");
+
+        assert!(labels.is_empty());
     }
 
     #[test]
