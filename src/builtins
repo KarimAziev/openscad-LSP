@@ -147,37 +147,28 @@ module import(file, center=false, dpi=96, convexity=1) {}
 
 /**
 
-Creates a cube in the first octant. When center is true, the cube is
-centered on the origin. Argument names are optional if given in the
-order shown here.
+Creates a cube in the first octant. When `center` is `true`, the cube is
+centered at the origin. Argument names are optional if they are given in
+the order shown here.
 
 ```scad
-cube(size = [ x, y, z ], center = true / false);
-cube(size = x, center = true / false);
+cube(size=[ x, y, z ], center=true / false);
+cube(size=x, center=true / false);
 
 ```
 
-**parameters**:
+**Parameters**
 
-**size**
-
-single value, cube with all sides this length
-
-3 value array [x,y,z], cube with dimensions x, y and z.
-
-**center**
-
-**false** (default), 1st (positive) octant, one corner at (0,0,0)
-
-**true**, cube is centered at (0,0,0)
+`size`: A 3-value array `[x, y, z]`, or a single value for a cube with all sides of that length.
+`center`: `false` (default) or `true`. If `true`, the cube is centered at `(0,0,0)`; otherwise, it is placed in the first (positive) octant with one corner at `(0,0,0)`.
 
 ```scad
 default values: cube();
-yields : cube(size = [ 1, 1, 1 ], center = false);
+yields : cube(size=[1, 1, 1], center=false);
 
 ```
 
-**examples**:
+**Examples**
 
 <https://en.wikibooks.org/wiki/File:OpenSCAD_example_Cube.jpg>
 
@@ -185,15 +176,15 @@ yields : cube(size = [ 1, 1, 1 ], center = false);
 
 ```scad
 // equivalent scripts for this example
-cube(size = 18);
+cube(size=18);
 cube(18);
-cube([ 18, 18, 18 ]);
-.
+cube([18, 18, 18]);
+
 cube(18, false);
-cube([ 18, 18, 18 ], false);
-cube([ 18, 18, 18 ], center = false);
-cube(size = [ 18, 18, 18 ], center = false);
-cube(center = false, size = [ 18, 18, 18 ]);
+cube([18, 18, 18], false);
+cube([18, 18, 18], center=false);
+cube(size=[18, 18, 18], center=false);
+cube(center=false, size=[18, 18, 18]);
 
 ```
 
@@ -1070,14 +1061,14 @@ polygon(a, [[ 2, 3, 0, 1, 2 ]]);
 polygon(
   points =
     [
-      [ 0, 0 ], [ 100, 0 ], [ 0, 100 ], [ 10, 10 ],
+      [ 0, 0 ], [ 100, 0 ], [ 0, 100 ], [10, 10],
       [ 80, 10 ], [ 10, 80 ]
     ],
   paths = [ [ 0, 1, 2 ], [ 3, 4, 5 ] ],
   convexity = 10);
 
 triangle_points = [
-  [ 0, 0 ], [ 100, 0 ], [ 0, 100 ], [ 10, 10 ], [ 80, 10 ],
+  [ 0, 0 ], [ 100, 0 ], [ 0, 100 ], [10, 10], [ 80, 10 ],
   [ 10, 80 ]
 ];
 triangle_paths = [ [ 0, 1, 2 ], [ 3, 4, 5 ] ];
@@ -1218,32 +1209,23 @@ module polygon(points, paths, convexity) {}
 /**
 
 Creates a square or rectangle in the first quadrant. When `center` is
-true the square is centered on the origin. Argument names are optional
+`true` the square is centered on the origin. Argument names are optional
 if given in the order shown here.
 
 ```scad
-square(size = [ x, y ], center = true / false);
-square(size = x, center = true / false);
+square(size=[x, y], center = true / false);
+square(size=x, center = true / false);
 
 ```
 
-**parameters**:
+**Parameters**
 
-**size**
-
-single value, square with both sides this length
-
-2 value array [x,y], rectangle with dimensions x and y
-
-**center**
-
-**false** (default), 1st (positive) quadrant, one corner at (0,0)
-
-**true**, square is centered at (0,0)
+`size`: single value, square with both sides this length. 2 value array [x,y], rectangle with dimensions x and y.
+`center`: `false` (default) or `true`. If `true`, the square is centered at `(0, 0)`; otherwise, it is placed in the first (positive) octant with one corner at `(0,0)`.
 
 ```scad
 default values: square();
-yields : square(size = [ 1, 1 ], center = false);
+yields : square(size = [1, 1], center=false);
 
 ```
 
@@ -1257,13 +1239,13 @@ yields : square(size = [ 1, 1 ], center = false);
 // equivalent scripts for this example
 square(size = 10);
 square(10);
-square([ 10, 10 ]);
+square([10, 10]);
 .
 square(10, false);
-square([ 10, 10 ], false);
-square([ 10, 10 ], center = false);
-square(size = [ 10, 10 ], center = false);
-square(center = false, size = [ 10, 10 ]);
+square([10, 10], false);
+square([10, 10], center = false);
+square(size = [10, 10], center = false);
+square(center = false, size = [10, 10]);
 
 ```
 
@@ -1273,8 +1255,8 @@ square(center = false, size = [ 10, 10 ]);
 
 ```scad
 // equivalent scripts for this example
-square([ 20, 10 ], true);
-a = [ 20, 10 ];
+square([20, 10], true);
+a = [20, 10];
 square(a, true);
 
 ```
@@ -3742,11 +3724,11 @@ a = 6;
 len_a = len(a);
 echo(a, len_a);
 
-array1 = [ 1, 2, 3, 4, 5, 6, 7, 8 ];
+array1 = [1, 2, 3, 4, 5, 6, 7, 8];
 len_array1 = len(array1);
 echo(array1, len_array1);
 
-array2 = [ [ 0, 0 ], [ 0, 1 ], [ 1, 0 ], [ 1, 1 ] ];
+array2 = [[ 0, 0], [0, 1], [1, 0], [1, 1]];
 len_array2 = len(array2);
 echo(array2, len_array2);
 
