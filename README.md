@@ -29,6 +29,7 @@ Main differences in this fork:
 - correct definition lookup for parameter defaults like `p = p` (RHS resolves to outer scope)
 - code snippets
 - function/module signatures on hover
+- unused local-variable diagnostics inside functions and modules
 - document symbols
 - formatter using Topiary
 - variable/module renaming (local scope and workspace/include-aware for global symbols)

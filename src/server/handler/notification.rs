@@ -1,11 +1,11 @@
 use std::{collections::HashSet, env, path::PathBuf};
 
 use lsp_types::{
-    Diagnostic, DiagnosticSeverity, DidChangeConfigurationParams, DidChangeTextDocumentParams,
-    DidChangeWatchedFilesParams, DidChangeWatchedFilesRegistrationOptions,
-    DidCloseTextDocumentParams, DidOpenTextDocumentParams, DidSaveTextDocumentParams,
-    FileChangeType, FileSystemWatcher, GlobPattern, InitializedParams, OneOf, Pattern,
-    PublishDiagnosticsParams, Registration, RegistrationParams, RelativePattern, Url, WatchKind,
+    DidChangeConfigurationParams, DidChangeTextDocumentParams, DidChangeWatchedFilesParams,
+    DidChangeWatchedFilesRegistrationOptions, DidCloseTextDocumentParams,
+    DidOpenTextDocumentParams, DidSaveTextDocumentParams, FileChangeType, FileSystemWatcher,
+    GlobPattern, InitializedParams, OneOf, Pattern, PublishDiagnosticsParams, Registration,
+    RegistrationParams, RelativePattern, Url, WatchKind,
 };
 use lsp_types::{
     notification::{DidChangeWatchedFiles, Notification as LspNotification},
@@ -13,7 +13,7 @@ use lsp_types::{
 };
 use serde::Deserialize;
 
-use crate::{server::Server, utils::*};
+use crate::{server::Server, server::diagnostics::document_diagnostics};
 
 // Notification handlers.
 impl Server {
@@ -25,6 +25,7 @@ impl Server {
         let DidOpenTextDocumentParams { text_document: doc } = params;
         self.open_documents.insert(doc.uri.clone());
         self.insert_code(doc.uri.clone(), doc.text);
+        self.publish_diagnostics_for_document(doc.uri.clone(), Some(doc.version));
         self.refresh_workspace_index_for_url(&doc.uri);
     }
 
@@ -45,52 +46,7 @@ impl Server {
 
         pc.borrow_mut().edit(&content_changes);
 
-        let mut diags: Vec<_> = error_nodes(pc.borrow().tree.walk())
-            .into_iter()
-            .map(|node| Diagnostic {
-                range: node.lsp_range(),
-                severity: Some(DiagnosticSeverity::ERROR),
-                message: if node.is_missing() {
-                    format!("missing {}", node.kind())
-                } else {
-                    "syntax error".to_owned()
-                },
-                ..Default::default()
-            })
-            .collect();
-
-        if content_changes.len() == 1 {
-            if let Some(range) = content_changes[0].range {
-                let bpc = pc.borrow();
-                let pos = to_point(range.start);
-                let mut cursor = bpc.tree.root_node().walk();
-                cursor.goto_first_child_for_point(pos);
-                let node = cursor.node();
-                let kind = node.kind();
-                // let text = node_text(&bpc.code, &node);
-
-                if kind.is_dependency_statement() && bpc.get_include_url(&node).is_none() {
-                    let mut range = node.child(1).unwrap().lsp_range();
-                    range.start.character += 1;
-                    range.end.character -= 1;
-                    diags.push(Diagnostic {
-                        range,
-                        severity: Some(DiagnosticSeverity::ERROR),
-                        message: "file not found!".to_owned(),
-                        ..Default::default()
-                    });
-                }
-            }
-        }
-
-        self.notify(lsp_server::Notification::new(
-            "textDocument/publishDiagnostics".into(),
-            PublishDiagnosticsParams {
-                uri: uri.clone(),
-                diagnostics: diags,
-                version: Some(text_document.version),
-            },
-        ));
+        self.publish_diagnostics_for_document(uri.clone(), Some(text_document.version));
 
         self.refresh_workspace_index_for_url(&uri);
     }
@@ -219,6 +175,22 @@ impl Server {
         self.refresh_workspace_index_for_url(&uri);
     }
 
+    fn publish_diagnostics_for_document(&mut self, uri: Url, version: Option<i32>) {
+        let Some(code) = self.codes.get(&uri) else {
+            return;
+        };
+        let diagnostics = document_diagnostics(&code.borrow());
+
+        self.notify(lsp_server::Notification::new(
+            "textDocument/publishDiagnostics".into(),
+            PublishDiagnosticsParams {
+                uri,
+                diagnostics,
+                version,
+            },
+        ));
+    }
+
     fn register_workspace_file_watchers(&mut self) {
         if !self.supports_dynamic_watched_files_registration()
             || self.watched_files_registered()
@@ -286,6 +258,7 @@ impl Server {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::utils::{node_text, to_position};
     use crate::{Cli, server::workspace_index::ResolvedSymbol};
     use clap::Parser;
     use lsp_server::{Connection, Message};

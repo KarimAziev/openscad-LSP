@@ -1,6 +1,7 @@
 #[macro_use]
 pub(crate) mod utils;
 pub(crate) mod code_helper;
+pub(crate) mod diagnostics;
 pub(crate) mod handler;
 pub(crate) mod parse_code;
 pub(crate) mod response_item;
