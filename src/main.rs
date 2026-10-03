@@ -3,12 +3,13 @@
 
 #[macro_use]
 mod server;
+mod check;
 mod topiary;
 
 use clap::Parser;
 use lsp_server::Connection;
 use server::*;
-use std::{error::Error, path::PathBuf};
+use std::{error::Error, path::PathBuf, process::ExitCode};
 
 #[derive(Parser)]
 #[clap(name = "OpenSCAD-LSP")]
@@ -25,6 +26,14 @@ pub(crate) struct Cli {
 
     #[clap(long, help = "use stdio instead of tcp")]
     stdio: bool,
+
+    #[clap(
+        long,
+        value_name = "PATH",
+        conflicts_with = "stdio",
+        help = "check a saved .scad file or directory and exit"
+    )]
+    check: Option<PathBuf>,
 
     #[clap(long, help = "include default params in auto-completion")]
     include_default_params: bool,
@@ -53,8 +62,12 @@ pub(crate) struct Cli {
     query_file: Option<PathBuf>,
 }
 
-fn main() -> Result<(), Box<dyn Error + Sync + Send>> {
+fn main() -> Result<ExitCode, Box<dyn Error + Sync + Send>> {
     let args = Cli::parse();
+
+    if let Some(path) = args.check.clone() {
+        return Ok(check::run(args, &path));
+    }
 
     let (connection, io_threads) = if args.stdio {
         Connection::stdio()
@@ -64,7 +77,7 @@ fn main() -> Result<(), Box<dyn Error + Sync + Send>> {
             Ok(res) => res,
             Err(err) => {
                 err_to_console!("{}", err);
-                return Ok(()); // return an error from main will print it to stderr
+                return Ok(ExitCode::SUCCESS); // return an error from main will print it to stderr
             }
         }
     };
@@ -74,5 +87,5 @@ fn main() -> Result<(), Box<dyn Error + Sync + Send>> {
     io_threads.join()?;
 
     err_to_console!("exit");
-    Ok(())
+    Ok(ExitCode::SUCCESS)
 }

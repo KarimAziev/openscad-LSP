@@ -161,6 +161,7 @@ Options:
       --ip <IP>                  [default: 127.0.0.1]
       --builtin <BUILTIN>        external builtin functions file path, if not set, the built-in file will be used [default: ]
       --stdio                    use stdio instead of tcp
+      --check <PATH>             check a saved .scad file or directory and exit
       --include-default-params   include default params in auto-completion
       --depth <DEPTH>            maximum include depth to traverse (0 = unlimited) [default: 0]
       --unused-use-includes      follow include dependencies when checking for unused use directives
@@ -169,6 +170,37 @@ Options:
   -h, --help                     Print help
   -V, --version                  Print version
 ```
+
+### Project checks
+
+Run diagnostics on saved files without starting an LSP connection:
+
+```sh
+openscad-lsp --check ./scad
+openscad-lsp --check ./scad/assembly.scad
+```
+
+Directory checks recursively scan `.scad` files, respect `.gitignore` and `.ignore`,
+and skip hidden files and directories such as `target` and `node_modules`.
+Diagnostics cover syntax errors, missing dependencies, unused local variables, and
+unused `use` directives. Unused-import analysis uses the one-level check by default;
+add `--unused-use-includes` for include-aware analysis. Library lookup uses the
+file's directory, `OPENSCADPATH`, and the standard OpenSCAD library directories.
+
+Each diagnostic is printed as `file:line:column: severity: message`, using absolute
+paths and one-based positions. Exit status is `0` for no diagnostics, `1` for
+warnings or errors, and `2` for invalid inputs or file access failures. Files are
+read from disk; save editor buffers before checking.
+
+In Emacs, run `M-x compile` and enter the check command. For example:
+
+```sh
+openscad-lsp --check ~/src/picar-cad/scad
+```
+
+Use ``C-x ` `` (`next-error`) to visit successive diagnostics, or select a diagnostic
+in the compilation buffer. Run `M-x recompile` to repeat the check. This workflow
+works with either Eglot or lsp-mode and does not require opening every project file.
 
 To change the config at runtime, you can send notification `workspace/didChangeConfiguration`
 (`search_paths` should use your platform path separator, e.g. `:` on Unix/macOS, `;` on Windows):

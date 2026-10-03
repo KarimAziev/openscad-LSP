@@ -77,17 +77,21 @@ impl Server {
         let mut code = BUILTINS_SCAD.to_owned();
 
         let mut external = false;
-        match read_to_string(builtin_path) {
-            Err(err) => {
-                err_to_console!(
-                    "failed to read external file of builtin-function, {:?}. will use the content included in binary.",
-                    err
-                );
-                args.builtin = BUILTIN_PATH.to_owned();
-            }
-            Ok(builtin_str) => {
-                code = builtin_str;
-                external = true;
+        if args.builtin.is_empty() {
+            args.builtin = BUILTIN_PATH.to_owned();
+        } else {
+            match read_to_string(builtin_path) {
+                Err(err) => {
+                    err_to_console!(
+                        "failed to read external file of builtin-function, {:?}. will use the content included in binary.",
+                        err
+                    );
+                    args.builtin = BUILTIN_PATH.to_owned();
+                }
+                Ok(builtin_str) => {
+                    code = builtin_str;
+                    external = true;
+                }
             }
         }
 
@@ -202,17 +206,24 @@ impl Server {
             .collect();
 
         if !ret.is_empty() {
-            eprintln!();
-            log_to_console!("search paths:");
+            let log_paths = self.args.check.is_none();
+            if log_paths {
+                eprintln!();
+                log_to_console!("search paths:");
+            }
 
             for lib in ret {
-                log_to_console!("{}", &lib);
+                if log_paths {
+                    log_to_console!("{}", &lib);
+                }
                 if !self.library_locations.borrow().contains(&lib) {
                     self.library_locations.borrow_mut().push(lib);
                 }
             }
 
-            eprintln!();
+            if log_paths {
+                eprintln!();
+            }
         }
     }
 

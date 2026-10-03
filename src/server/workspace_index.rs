@@ -245,9 +245,8 @@ impl Server {
             .cloned()
             .collect();
 
-        let types = Self::scad_types();
         for root in &self.workspace_roots {
-            Self::scan_directory_for_scad_files(root, &types, &mut urls);
+            Self::scan_directory_for_scad_files(root, &mut urls);
         }
 
         urls
@@ -360,16 +359,15 @@ impl Server {
         builder.build().expect("build types")
     }
 
-    fn scan_directory_for_scad_files(dir: &Path, types: &Types, urls: &mut HashSet<Url>) {
-        if !dir.exists() {
-            return;
-        }
-
+    pub(crate) fn walk_scad_files(dir: &Path) -> ignore::Walk {
         let mut builder = WalkBuilder::new(dir);
         builder.standard_filters(true);
         builder.follow_links(false);
         builder
             .filter_entry(|entry| {
+                if entry.depth() > 0 && entry.file_name().to_string_lossy().starts_with('.') {
+                    return false;
+                }
                 entry
                     .file_type()
                     .map(|ft| {
@@ -381,9 +379,17 @@ impl Server {
                     })
                     .unwrap_or(true)
             })
-            .types(types.clone());
+            .types(Self::scad_types());
 
-        for result in builder.build() {
+        builder.build()
+    }
+
+    fn scan_directory_for_scad_files(dir: &Path, urls: &mut HashSet<Url>) {
+        if !dir.exists() {
+            return;
+        }
+
+        for result in Self::walk_scad_files(dir) {
             let Ok(entry) = result else {
                 continue;
             };
