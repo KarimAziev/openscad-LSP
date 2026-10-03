@@ -38,6 +38,12 @@ pub(crate) struct Cli {
 
     #[clap(
         long,
+        help = "follow include dependencies when checking for unused use directives"
+    )]
+    unused_use_includes: bool,
+
+    #[clap(
+        long,
         default_value_t = String::from("  "),
         help = r#"The indentation string used for that particular language. Defaults to "  " if not provided. Any string can be provided, but in most instances will be some whitespace: "  ", "    ", or "\t"."#
     )]

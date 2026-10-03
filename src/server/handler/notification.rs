@@ -27,6 +27,7 @@ impl Server {
         self.insert_code(doc.uri.clone(), doc.text);
         self.publish_diagnostics_for_document(doc.uri.clone(), Some(doc.version));
         self.refresh_workspace_index_for_url(&doc.uri);
+        self.refresh_open_document_diagnostics(Some(&doc.uri));
     }
 
     pub(crate) fn handle_did_change_text_document(&mut self, params: DidChangeTextDocumentParams) {
@@ -49,6 +50,7 @@ impl Server {
         self.publish_diagnostics_for_document(uri.clone(), Some(text_document.version));
 
         self.refresh_workspace_index_for_url(&uri);
+        self.refresh_open_document_diagnostics(Some(&uri));
     }
 
     pub(crate) fn handle_did_change_watched_files(&mut self, params: DidChangeWatchedFilesParams) {
@@ -95,11 +97,15 @@ impl Server {
             // File creation/deletion can change whether previously missing dependencies resolve, so
             // rebuild the workspace graph instead of trusting reverse edges from the old state.
             self.rebuild_workspace_index();
+            self.refresh_open_document_diagnostics(None);
             return;
         }
 
-        for url in changed_urls {
-            self.refresh_workspace_index_for_url(&url);
+        if !changed_urls.is_empty() {
+            for url in changed_urls {
+                self.refresh_workspace_index_for_url(&url);
+                self.refresh_open_document_diagnostics(Some(&url));
+            }
         }
     }
 
@@ -160,6 +166,7 @@ impl Server {
             code.borrow_mut().changed = true;
         }
         self.clear_workspace_index();
+        self.refresh_open_document_diagnostics(None);
     }
 
     pub(crate) fn handle_did_save_text_document(&mut self, _params: DidSaveTextDocumentParams) {}
@@ -173,13 +180,45 @@ impl Server {
         }
 
         self.refresh_workspace_index_for_url(&uri);
+        self.refresh_open_document_diagnostics(Some(&uri));
+    }
+
+    fn refresh_open_document_diagnostics(&mut self, changed: Option<&Url>) {
+        let urls: Vec<_> = self
+            .open_documents
+            .iter()
+            .filter(|url| Some(*url) != changed)
+            .filter(|url| {
+                let Some(changed) = changed else {
+                    return true;
+                };
+                if self.args.unused_use_includes {
+                    return true;
+                }
+                let Some(code) = self.codes.get(*url) else {
+                    return false;
+                };
+                let code = code.borrow();
+                let root = code.tree.root_node();
+                root.named_children(&mut root.walk()).any(|node| {
+                    node.kind() == "use_statement"
+                        && code.get_include_url(&node).as_ref() == Some(changed)
+                })
+            })
+            .cloned()
+            .collect();
+        for url in urls {
+            self.publish_diagnostics_for_document(url, None);
+        }
     }
 
     fn publish_diagnostics_for_document(&mut self, uri: Url, version: Option<i32>) {
-        let Some(code) = self.codes.get(&uri) else {
+        let Some(code) = self.codes.get(&uri).cloned() else {
             return;
         };
-        let diagnostics = document_diagnostics(&code.borrow());
+        let code = code.borrow();
+        let mut diagnostics = document_diagnostics(&code);
+        diagnostics.extend(self.unused_use_diagnostics(&code));
 
         self.notify(lsp_server::Notification::new(
             "textDocument/publishDiagnostics".into(),
@@ -277,6 +316,158 @@ mod tests {
         let mut server = Server::new(server_conn, args);
         server.workspace_roots = vec![workspace_root.to_path_buf()];
         (server, client_conn)
+    }
+
+    fn published_diagnostics(client: &Connection, uri: &Url) -> PublishDiagnosticsParams {
+        client
+            .receiver
+            .try_iter()
+            .filter_map(|message| match message {
+                Message::Notification(notification)
+                    if notification.method == "textDocument/publishDiagnostics" =>
+                {
+                    Some(
+                        serde_json::from_value::<PublishDiagnosticsParams>(notification.params)
+                            .unwrap(),
+                    )
+                }
+                _ => None,
+            })
+            .find(|params| params.uri == *uri)
+            .expect("published diagnostics")
+    }
+
+    #[test]
+    fn default_diagnostics_refresh_only_changed_documents_and_direct_users() {
+        let tmp = tempdir().unwrap();
+        let (mut server, client) = make_server(tmp.path());
+        for (name, source) in [
+            ("lib.scad", "module shape() {}"),
+            ("params.scad", "size = 1;"),
+            (
+                "main.scad",
+                "include <params.scad>\nuse <lib.scad>\nshape();",
+            ),
+            ("other.scad", "cube(1);"),
+        ] {
+            let path = tmp.path().join(name);
+            fs::write(&path, source).unwrap();
+            let url = Url::from_file_path(path).unwrap();
+            server.open_documents.insert(url.clone());
+            server.insert_code(url, source.to_owned());
+        }
+
+        for (name, source, expected) in [
+            ("other.scad", "cube(2);", vec!["other.scad"]),
+            ("params.scad", "size = 2;", vec!["params.scad"]),
+            (
+                "lib.scad",
+                "module other() {}",
+                vec!["lib.scad", "main.scad"],
+            ),
+        ] {
+            let url = Url::from_file_path(tmp.path().join(name)).unwrap();
+            server.handle_did_change_text_document(DidChangeTextDocumentParams {
+                text_document: lsp_types::VersionedTextDocumentIdentifier::new(url, 2),
+                content_changes: vec![lsp_types::TextDocumentContentChangeEvent {
+                    range: None,
+                    range_length: None,
+                    text: source.to_owned(),
+                }],
+            });
+            let published: Vec<_> = client
+                .receiver
+                .try_iter()
+                .filter_map(|message| {
+                    let Message::Notification(notification) = message else {
+                        return None;
+                    };
+                    if notification.method != "textDocument/publishDiagnostics" {
+                        return None;
+                    }
+                    let params: PublishDiagnosticsParams =
+                        serde_json::from_value(notification.params).unwrap();
+                    Some(params.uri)
+                })
+                .collect();
+            assert_eq!(published.len(), expected.len(), "edit to {name}");
+            for name in expected {
+                let url = Url::from_file_path(tmp.path().join(name)).unwrap();
+                assert!(published.contains(&url), "missing diagnostics for {name}");
+            }
+        }
+    }
+
+    #[test]
+    fn unused_use_diagnostics_refresh_for_document_and_library_edits() {
+        let tmp = tempdir().unwrap();
+        let lib_path = tmp.path().join("lib.scad");
+        fs::write(&lib_path, "module shape() {}").unwrap();
+        let lib_url = Url::from_file_path(&lib_path).unwrap();
+        let main_url = Url::from_file_path(tmp.path().join("main.scad")).unwrap();
+        let (mut server, client) = make_server(tmp.path());
+        server.handle_did_open_text_document(DidOpenTextDocumentParams {
+            text_document: lsp_types::TextDocumentItem::new(
+                main_url.clone(),
+                "openscad".to_owned(),
+                1,
+                "use <lib.scad>\ncube(1);".to_owned(),
+            ),
+        });
+        let published = published_diagnostics(&client, &main_url);
+        assert_eq!(published.version, Some(1));
+        assert_eq!(published.diagnostics.len(), 1);
+        assert_eq!(
+            published.diagnostics[0].message,
+            "unused use directive `<lib.scad>`"
+        );
+
+        server.handle_did_change_text_document(DidChangeTextDocumentParams {
+            text_document: lsp_types::VersionedTextDocumentIdentifier::new(main_url.clone(), 2),
+            content_changes: vec![lsp_types::TextDocumentContentChangeEvent {
+                range: None,
+                range_length: None,
+                text: "use <lib.scad>\nshape();".to_owned(),
+            }],
+        });
+        let published = published_diagnostics(&client, &main_url);
+        assert_eq!(published.version, Some(2));
+        assert!(published.diagnostics.is_empty());
+
+        fs::write(&lib_path, "module other() {}").unwrap();
+        server.handle_did_change_watched_files(DidChangeWatchedFilesParams {
+            changes: vec![lsp_types::FileEvent {
+                uri: lib_url.clone(),
+                typ: FileChangeType::CHANGED,
+            }],
+        });
+        assert_eq!(
+            published_diagnostics(&client, &main_url).diagnostics.len(),
+            1
+        );
+
+        // An open library's buffer is authoritative even if disk content differs.
+        server.handle_did_open_text_document(DidOpenTextDocumentParams {
+            text_document: lsp_types::TextDocumentItem::new(
+                lib_url.clone(),
+                "openscad".to_owned(),
+                1,
+                "module shape() {}".to_owned(),
+            ),
+        });
+        assert!(
+            published_diagnostics(&client, &main_url)
+                .diagnostics
+                .is_empty()
+        );
+
+        server.handle_did_close_text_document(DidCloseTextDocumentParams {
+            text_document: lsp_types::TextDocumentIdentifier::new(lib_url),
+        });
+        assert_eq!(
+            published_diagnostics(&client, &main_url).diagnostics.len(),
+            1
+        );
     }
 
     fn nth_identifier_range(server: &mut Server, url: &Url, name: &str, nth: usize) -> Range {

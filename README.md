@@ -32,12 +32,29 @@ Main differences in this fork:
 - code snippets
 - function/module signatures on hover
 - unused local-variable diagnostics inside functions and modules
+- unused `use <...>` diagnostics with editor fading for unnecessary imports
 - document symbols
 - formatter using Topiary
 - variable/module renaming (local scope and workspace/include-aware for global symbols)
 - indexed/cached identifier lookup for workspace-scale rename/reference resolution
 - watched workspace `.scad` file changes refresh the rename/reference index for closed files
 - hover and suggestion documentation from comments before function/module declarations
+
+Unused `use` warnings default to a one-level check: read the top-level function and
+module declarations in each directly used file and look for references in the
+current document. Variables are excluded. The check does not follow `include`
+directives or nested `use` directives. Calls inside function/module definitions and
+function-value references count as usage. Matching names keep an import even when
+shadowing or duplicate imports might make it redundant. Missing or invalid directly
+used files are skipped. Edits refresh diagnostics for the edited document and open
+documents that directly use it.
+
+Pass `--unused-use-includes` to account for references and callable reexports through
+textual `include` dependencies. This mode traverses included files, respects
+`--depth`, and can cost more on large projects. Callables already supplied by a
+file-scope `include` do not count as usage of a `use` that reexports the same
+declarations. Incomplete dependency analysis suppresses warnings in this mode.
+`include` directives themselves are never reported as unused.
 
 ## Install
 
@@ -146,6 +163,7 @@ Options:
       --stdio                    use stdio instead of tcp
       --include-default-params   include default params in auto-completion
       --depth <DEPTH>            maximum include depth to traverse (0 = unlimited) [default: 0]
+      --unused-use-includes      follow include dependencies when checking for unused use directives
       --indent <INDENT>          The indentation string used for that particular language. Defaults to "  " if not provided. Any string can be provided, but in most instances will be some whitespace: "  ", "    ", or "\t". [default: "  "]
       --query-file <QUERY_FILE>  The query file used for topiary formatting
   -h, --help                     Print help
