@@ -1186,9 +1186,9 @@ checksum = "c4013970217383f67b18aef68f6fb2e8d409bc5755227092d32efb0422ba24b8"
 
 [[package]]
 name = "tree-sitter-openscad-ng"
-version = "0.6.1"
+version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aa00e191bb0053fe78d58edce19a3475da399d3c25caf89c56c8b72b894b236f"
+checksum = "a9286371873e82cb888be0d9394dd3c6a6aaca66fa2fd31879baafb2e4008488"
 dependencies = [
  "cc",
  "tree-sitter-language",
