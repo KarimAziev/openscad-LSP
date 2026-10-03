@@ -258,6 +258,45 @@ impl Server {
         vec![]
     }
 
+    fn visible_let_bindings<'a>(scope: Node<'a>, start_node: &Node) -> Vec<Node<'a>> {
+        let bindings_owner = match scope.kind() {
+            "let_expression" | "let_block" => scope,
+            // The grammar represents `let(...) for/if/each ...` with a prefix
+            // whose bindings belong to the enclosing comprehension clause.
+            "for_clause" | "if_clause" | "each" => {
+                let Some(prefix) = scope
+                    .named_children(&mut scope.walk())
+                    .find(|child| child.kind() == "let_prefix")
+                else {
+                    return vec![];
+                };
+                prefix
+            }
+            _ => return vec![],
+        };
+        let Some(assignments) = bindings_owner
+            .named_children(&mut bindings_owner.walk())
+            .find(|child| child.kind() == "assignments")
+        else {
+            return vec![];
+        };
+
+        let mut names: Vec<_> = assignments
+            .named_children(&mut assignments.walk())
+            .filter(|child| child.kind() == "assignment")
+            .filter_map(|assignment| {
+                let name = assignment.child_by_field_name("name")?;
+                // Let initializers are sequential: a binding is visible only
+                // after its initializer, or on its own declaration name.
+                (name.kind() == "identifier"
+                    && (assignment.end_byte() <= start_node.start_byte() || name == *start_node))
+                    .then_some(name)
+            })
+            .collect();
+        names.reverse();
+        names
+    }
+
     fn find_identities_inner(
         &mut self,
         code: &ParsedCode,
@@ -340,6 +379,22 @@ impl Server {
 
         'outer: while parent.is_some() {
             let is_top_level_node = parent.unwrap().parent().is_none();
+
+            for name_node in Self::visible_let_bindings(parent.unwrap(), start_node) {
+                let name = node_text(&code.code, &name_node);
+                if comparator(name) {
+                    result.push(Rc::new(RefCell::new(Item {
+                        name: name.to_owned(),
+                        kind: ItemKind::Variable,
+                        range: name_node.lsp_range(),
+                        url: Some(code.url.clone()),
+                        ..Default::default()
+                    })));
+                    if !findall {
+                        return result;
+                    }
+                }
+            }
 
             loop {
                 if node.kind().is_dependency_statement() {

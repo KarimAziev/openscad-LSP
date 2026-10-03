@@ -26,6 +26,8 @@ Main differences in this fork:
 - code and include-path completion
 - completion docs/signatures and callable parameter-name suggestions
 - jump to definition
+- definition lookup for local `let` bindings, including references in later initializers,
+  nested expressions, list comprehensions, and module bodies (with lexical shadowing)
 - correct definition lookup for parameter defaults like `p = p` (RHS resolves to outer scope)
 - code snippets
 - function/module signatures on hover

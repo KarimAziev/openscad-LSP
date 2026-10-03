@@ -886,6 +886,121 @@ mod tests {
         items.into_iter().map(|item| item.label).collect()
     }
 
+    fn assert_definition_at_marker(source: &str, expected: Option<(&str, usize)>) {
+        let tmp = tempdir().unwrap();
+        let (mut server, client_conn) = make_server(tmp.path());
+        let uri = Url::from_file_path(tmp.path().join("main.scad")).unwrap();
+        let (code, position) = source_and_position(source);
+        let parsed = server.insert_code(uri.clone(), code.clone());
+        assert!(!parsed.borrow().tree.root_node().has_error(), "{source}");
+
+        server.handle_definition(
+            RequestId::from(1),
+            GotoDefinitionParams {
+                text_document_position_params: TextDocumentPositionParams {
+                    text_document: TextDocumentIdentifier { uri: uri.clone() },
+                    position,
+                },
+                work_done_progress_params: WorkDoneProgressParams::default(),
+                partial_result_params: PartialResultParams::default(),
+            },
+        );
+        let Message::Response(response) = client_conn.receiver.recv().unwrap() else {
+            panic!("expected definition response");
+        };
+        assert!(response.error.is_none());
+        let result: GotoDefinitionResponse =
+            serde_json::from_value(response.result.unwrap()).unwrap();
+        let GotoDefinitionResponse::Array(locations) = result else {
+            panic!("expected definition locations");
+        };
+
+        let expected_locations = expected.map_or_else(Vec::new, |(text, length)| {
+            let offset = code.find(text).expect("expected declaration text");
+            let mut marked = code.clone();
+            marked.insert(offset, '$');
+            let (_, start) = source_and_position(&marked);
+            marked = code.clone();
+            marked.insert(offset + length, '$');
+            let (_, end) = source_and_position(&marked);
+            vec![Location {
+                uri,
+                range: Range { start, end },
+            }]
+        });
+        assert_eq!(locations, expected_locations, "{source}");
+    }
+
+    #[test]
+    fn definition_resolves_let_bindings_in_initializers_and_body() {
+        assert_definition_at_marker(
+            "function f(bolt_d=4) = assert(bolt_d > 0)\n\
+             let(bolt_r = bolt_d / 2,\n\
+                 // A later binding uses the earlier one.\n\
+                 pad = $bolt_r + 1) [bolt_r, pad];",
+            Some(("bolt_r", 6)),
+        );
+        assert_definition_at_marker(
+            "function f() = let(radius = 2, diameter = radius * 2) [radius, $diameter];",
+            Some(("diameter", 8)),
+        );
+        assert_definition_at_marker(
+            "function f() = let($radius = 2) radius;",
+            Some(("radius", 6)),
+        );
+    }
+
+    #[test]
+    fn definition_resolves_nested_let_and_comprehension_bindings() {
+        for source in [
+            "function f() = let(x=1) let(inner=x+1) $inner;",
+            "function f(pts) = [for(v=pts) let(inner=v[0], y=v[1]) [$inner, y]];",
+            "function f() = [let(inner=2) for(i=[0:1]) $inner];",
+            "function f() = [let(inner=2) if($inner > 0) inner];",
+            "function f() = [let(inner=[1,2]) each $inner];",
+            "module m() { let(inner=2) translate([$inner,0,0]) cube(1); }",
+            "let(inner=2) { echo($inner); }",
+        ] {
+            assert_definition_at_marker(source, Some(("inner", 5)));
+        }
+    }
+
+    #[test]
+    fn definition_let_shadowing_and_initializer_visibility() {
+        assert_definition_at_marker("function f(x=0) = let(x=1) let(x=2) $x;", Some(("x=2", 1)));
+        assert_definition_at_marker(
+            "function f(x=0) = let(x=1) let(x=$x+1) x;",
+            Some(("x=1", 1)),
+        );
+        assert_definition_at_marker("function f(x=0) = let(x=$x+1) x;", Some(("x=0", 1)));
+        assert_definition_at_marker("x=10; function f() = let(x=$x+1) x;", Some(("x=10", 4)));
+        assert_definition_at_marker("function f(x=0) = let(y=$x, x=1) y;", Some(("x=0", 1)));
+        assert_definition_at_marker(
+            "function f() = let(x=1, y=let(x=2) x, z=$x) z;",
+            Some(("x=1", 1)),
+        );
+        assert_definition_at_marker("function f(x=0) = [let(x=1) x, $x];", Some(("x=0", 1)));
+        assert_definition_at_marker(
+            "function f(x=0) = [let(x=1) for(i=[0:1]) x, $x];",
+            Some(("x=0", 1)),
+        );
+    }
+
+    #[test]
+    fn definition_does_not_expose_unavailable_let_bindings() {
+        for source in [
+            "function f() = let(x=$x+1) x;",
+            "function f() = let(y=$x, x=1) y;",
+            "function f() = [let(x=1) x, $x];",
+            "function f() = [let(x=1) for(i=[0:1]) x, $x];",
+            "let(x=1) echo(x); echo($x);",
+            "function f() = let(x=1) x; echo($x);",
+            "function g(x) = x; function f() = g(x=1) + $x;",
+        ] {
+            assert_definition_at_marker(source, None);
+        }
+    }
+
     fn nth_identifier_position(server: &mut Server, url: &Url, name: &str, nth: usize) -> Position {
         let code = server.get_code(url).expect("load file");
         if let Ok(mut code_mut) = code.try_borrow_mut() {
